@@ -26,6 +26,8 @@ class EnclosureResult:
     section: Part.Shape
     plane: Part.Shape
     internal_wires: list
+    contour_sides: dict = None
+    root_clearance: Part.Shape = None
 
 
 @dataclass
@@ -613,6 +615,62 @@ def _same_geometric_edge(first, second, tolerance):
     )
 
 
+def _contour_groups(
+    contours,
+    contour_sides,
+    contour_indices,
+    lip_on,
+    contour_mode,
+):
+    """Resolve backwards-compatible selection into per-side contour groups."""
+
+    assignments = {}
+    if contour_sides is not None:
+        items = (
+            contour_sides.items()
+            if hasattr(contour_sides, "items")
+            else enumerate(contour_sides)
+        )
+        for raw_index, raw_side in items:
+            index = int(raw_index)
+            side = str(raw_side).lower()
+            if side not in ("negative", "positive", "none"):
+                raise ValueError(
+                    "Each contour side must be 'negative', 'positive', or 'none'."
+                )
+            if index < 0 or index >= len(contours):
+                raise ValueError("A selected contour index is no longer available.")
+            assignments[index] = side
+    elif contour_indices is not None:
+        for raw_index in contour_indices:
+            index = int(raw_index)
+            if index < 0 or index >= len(contours):
+                raise ValueError("A selected contour index is no longer available.")
+            assignments[index] = lip_on
+    else:
+        for contour in contours:
+            if contour.kind == contour_mode:
+                assignments[contour.index] = lip_on
+
+    groups = {"negative": [], "positive": []}
+    normalized = {}
+    for contour in contours:
+        side = assignments.get(contour.index, "none")
+        normalized[contour.index] = side
+        if side in groups:
+            groups[side].append(contour.wire)
+    if not groups["negative"] and not groups["positive"]:
+        if contour_sides is None and contour_indices is None:
+            if contour_mode == "internal":
+                raise ValueError(
+                    "No internal closed section contours were found. "
+                    "Try the outermost-perimeter contour mode."
+                )
+            raise ValueError("No outer closed section perimeters were found.")
+        raise ValueError("Assign at least one contour to the negative or positive half.")
+    return groups, normalized
+
+
 def _ruled_joint_volumes(
     split,
     selected_wires,
@@ -627,6 +685,7 @@ def _ruled_joint_volumes(
     receiver = split.positive if lip_on == "negative" else split.negative
     lip_parts = []
     groove_parts = []
+    root_parts = []
     epsilon = max(split.section.BoundBox.DiagonalLength * 1e-6, tolerance * 10)
     for section_face in split.section.Faces:
         boundary_edges = [
@@ -651,15 +710,33 @@ def _ruled_joint_volumes(
         surface_face = _matching_surface_face(section_face, split.surface, tolerance)
         point = section_face.CenterOfMass
         normal = _surface_normal_at_face(surface_face, point)
-        if not split.positive.isInside(point + normal * epsilon, tolerance, True):
-            normal = -normal
-        direction = normal if lip_on == "negative" else -normal
-        lip_piece = _extrude_faces(lip_band, direction * lip_height)
+        receiver = split.positive if lip_on == "negative" else split.negative
+        candidates = []
+        for candidate_direction in (normal, -normal):
+            candidate = _extrude_faces(
+                lip_band, candidate_direction * lip_height
+            ).common(receiver)
+            volume = 0.0 if candidate.isNull() else candidate.Volume
+            candidates.append((volume, candidate_direction, candidate))
+        _volume, direction, lip_piece = max(candidates, key=lambda item: item[0])
+        if lip_piece.isNull() or not lip_piece.Solids:
+            continue
         groove_piece = _extrude_faces(
             groove_band,
-            direction * (lip_height + vertical_clearance + tolerance * 2),
+            direction
+            * (lip_height + vertical_clearance * 0.5 + tolerance * 2),
         )
         groove_piece.translate(-direction * tolerance)
+        if vertical_clearance > tolerance:
+            root_band = groove_band.cut(lip_band)
+            if not root_band.isNull() and root_band.Faces:
+                root_piece = _extrude_faces(
+                    root_band,
+                    -direction * (vertical_clearance * 0.5 + tolerance),
+                )
+                root_piece.translate(direction * tolerance)
+                if not root_piece.isNull():
+                    root_parts.extend(root_piece.Solids)
         if not lip_piece.isNull():
             lip_parts.extend(lip_piece.Solids)
         if not groove_piece.isNull():
@@ -669,7 +746,7 @@ def _ruled_joint_volumes(
         raise ValueError("No lip/groove volume fits along the selected sketch seam.")
     raw_lip = _fuse_shapes(lip_parts)
     raw_groove = _combine(groove_parts)
-    lip = _safe_refine(raw_lip.common(receiver))
+    lip = _safe_refine(raw_lip)
     if lip.isNull() or not lip.Solids:
         raise ValueError("The receiving half contains no material for the sketch-seam lip.")
     # Adjacent ruled panels use different local normals. Their prisms can form
@@ -677,7 +754,7 @@ def _ruled_joint_volumes(
     # transferred lip in the wider/deeper groove tool. This guarantees that
     # the two completed halves cannot retain overlapping corner material.
     groove = raw_groove
-    return lip, groove
+    return lip, groove, _combine(root_parts)
 
 
 def make_enclosure_with_sketch(
@@ -691,6 +768,7 @@ def make_enclosure_with_sketch(
     lip_on="negative",
     contour_mode="outer",
     contour_indices=None,
+    contour_sides=None,
     tolerance=DEFAULT_TOLERANCE,
 ):
     """Split on an extruded open sketch and add a face-relative lip/groove."""
@@ -712,38 +790,42 @@ def make_enclosure_with_sketch(
     split, contours = analyze_sketch_contours(
         shape, sketch_shape, sketch_normal, tolerance
     )
-    if contour_indices is None:
-        wires = [contour.wire for contour in contours if contour.kind == contour_mode]
-    else:
-        indices = []
-        for value in contour_indices:
-            index = int(value)
-            if index not in indices:
-                indices.append(index)
-        if any(index < 0 or index >= len(contours) for index in indices):
-            raise ValueError("A selected sketch contour is no longer available.")
-        wires = [contours[index].wire for index in indices]
-    if not wires:
-        raise ValueError("Select at least one sketch-seam contour for the joint.")
-
-    lip, groove = _ruled_joint_volumes(
-        split,
-        wires,
-        lip_width,
-        lip_height,
-        clearance,
-        vertical_clearance,
-        lip_on,
-        tolerance,
+    groups, assignments = _contour_groups(
+        contours, contour_sides, contour_indices, lip_on, contour_mode
     )
     negative = split.negative
     positive = split.positive
-    if lip_on == "negative":
-        negative = _safe_refine(negative.fuse(lip))
-        positive = _safe_refine(positive.cut(groove).cut(lip))
-    else:
-        positive = _safe_refine(positive.fuse(lip))
-        negative = _safe_refine(negative.cut(groove).cut(lip))
+    lips = []
+    grooves = []
+    root_clearances = []
+    for side in ("negative", "positive"):
+        wires = groups[side]
+        if not wires:
+            continue
+        lip, groove, root_clearance = _ruled_joint_volumes(
+            split,
+            wires,
+            lip_width,
+            lip_height,
+            clearance,
+            vertical_clearance,
+            side,
+            tolerance,
+        )
+        lips.append(lip)
+        grooves.append(groove)
+        if root_clearance is not None and not root_clearance.isNull():
+            root_clearances.append(root_clearance)
+        if side == "negative":
+            if root_clearance is not None and not root_clearance.isNull():
+                negative = negative.cut(root_clearance)
+            negative = _safe_refine(negative.fuse(lip))
+            positive = _safe_refine(positive.cut(groove).cut(lip))
+        else:
+            if root_clearance is not None and not root_clearance.isNull():
+                positive = positive.cut(root_clearance)
+            positive = _safe_refine(positive.fuse(lip))
+            negative = _safe_refine(negative.cut(groove).cut(lip))
     negative = _discard_boolean_slivers(negative, tolerance)
     positive = _discard_boolean_slivers(positive, tolerance)
     if not negative.isValid() or not positive.isValid():
@@ -753,11 +835,13 @@ def make_enclosure_with_sketch(
     return EnclosureResult(
         negative=negative,
         positive=positive,
-        lip=lip,
-        groove=groove,
+        lip=_combine(lips),
+        groove=_combine(grooves),
         section=split.section,
         plane=split.surface,
-        internal_wires=wires,
+        internal_wires=groups["negative"] + groups["positive"],
+        contour_sides=assignments,
+        root_clearance=_combine(root_clearances),
     )
 
 
@@ -1084,6 +1168,50 @@ def _extrude_faces(shape, vector):
     return _safe_refine(result)
 
 
+def _plane_joint_volumes(
+    section,
+    wires,
+    negative_half,
+    positive_half,
+    normal,
+    lip_width,
+    lip_height,
+    clearance,
+    vertical_clearance,
+    lip_on,
+    tolerance,
+):
+    lip_footprint, groove_footprint = _joint_footprints(
+        section, wires, lip_width, clearance, tolerance
+    )
+    direction = normal if lip_on == "negative" else -normal
+    receiver = positive_half if lip_on == "negative" else negative_half
+    raw_lip = _extrude_faces(lip_footprint, direction * lip_height)
+    lip = _safe_refine(raw_lip.common(receiver))
+    if lip.isNull() or not lip.Solids:
+        raise RuntimeError(
+            "The receiving half contains no material inside the requested lip region."
+        )
+
+    tip_clearance = vertical_clearance * 0.5
+    groove = _extrude_faces(
+        groove_footprint,
+        direction * (lip_height + tip_clearance + tolerance * 2),
+    )
+    groove.translate(-direction * tolerance)
+
+    root_clearance = Part.Shape()
+    if vertical_clearance > tolerance:
+        root_band = groove_footprint.cut(lip_footprint)
+        if not root_band.isNull() and root_band.Faces:
+            root_clearance = _extrude_faces(
+                root_band,
+                -direction * (vertical_clearance * 0.5 + tolerance),
+            )
+            root_clearance.translate(direction * tolerance)
+    return lip, groove, root_clearance
+
+
 def make_enclosure(
     shape,
     plane_origin,
@@ -1095,6 +1223,7 @@ def make_enclosure(
     lip_on="negative",
     contour_mode="internal",
     contour_indices=None,
+    contour_sides=None,
     tolerance=DEFAULT_TOLERANCE,
 ):
     """Split ``shape`` and add a matched lip/groove joint.
@@ -1137,62 +1266,49 @@ def make_enclosure(
     section, plane_face, contours = analyze_section_contours(
         shape, origin, normal, tolerance
     )
-    if contour_indices is None:
-        wires = [
-            contour.wire
-            for contour in contours
-            if contour.kind == contour_mode
-        ]
-    else:
-        indices = []
-        for value in contour_indices:
-            index = int(value)
-            if index not in indices:
-                indices.append(index)
-        if any(index < 0 or index >= len(contours) for index in indices):
-            raise ValueError("A selected contour index is no longer available.")
-        wires = [contours[index].wire for index in indices]
-    if not wires:
-        if contour_indices is not None:
-            raise ValueError("Select at least one contour for the joint.")
-        if contour_mode == "internal":
-            raise ValueError(
-                "No internal closed section contours were found. "
-                "Try the outermost-perimeter contour mode."
-            )
-        raise ValueError("No outer closed section perimeters were found.")
+    groups, assignments = _contour_groups(
+        contours, contour_sides, contour_indices, lip_on, contour_mode
+    )
 
     negative, positive = _split_sides(
         shape, plane_face, origin, normal, tolerance
     )
-    lip_footprint, groove_footprint = _joint_footprints(
-        section, wires, lip_width, clearance, tolerance
-    )
-
-    direction = normal if lip_on == "negative" else -normal
-    raw_lip_volume = _extrude_faces(lip_footprint, direction * lip_height)
-    receiving_half = positive if lip_on == "negative" else negative
-    lip_volume = raw_lip_volume.common(receiving_half)
-    if lip_volume.isNull() or not lip_volume.Solids:
-        raise RuntimeError(
-            "The receiving half contains no material inside the requested lip region."
+    base_negative = negative
+    base_positive = positive
+    lips = []
+    grooves = []
+    root_clearances = []
+    for side in ("negative", "positive"):
+        wires = groups[side]
+        if not wires:
+            continue
+        lip, groove, root_clearance = _plane_joint_volumes(
+            section,
+            wires,
+            base_negative,
+            base_positive,
+            normal,
+            lip_width,
+            lip_height,
+            clearance,
+            vertical_clearance,
+            side,
+            tolerance,
         )
-    lip_volume = _safe_refine(lip_volume)
-
-    # Start the cutting tool just behind the split plane to avoid a Boolean
-    # failure caused by a merely coincident starting face.
-    groove_depth = lip_height + vertical_clearance
-    groove_volume = _extrude_faces(
-        groove_footprint, direction * (groove_depth + tolerance * 2)
-    )
-    groove_volume.translate(-direction * tolerance)
-
-    if lip_on == "negative":
-        negative = _safe_refine(negative.fuse(lip_volume))
-        positive = _safe_refine(positive.cut(groove_volume))
-    else:
-        positive = _safe_refine(positive.fuse(lip_volume))
-        negative = _safe_refine(negative.cut(groove_volume))
+        lips.append(lip)
+        grooves.append(groove)
+        if not root_clearance.isNull():
+            root_clearances.append(root_clearance)
+        if side == "negative":
+            if not root_clearance.isNull():
+                negative = negative.cut(root_clearance)
+            negative = _safe_refine(negative.fuse(lip))
+            positive = _safe_refine(positive.cut(groove).cut(lip))
+        else:
+            if not root_clearance.isNull():
+                positive = positive.cut(root_clearance)
+            positive = _safe_refine(positive.fuse(lip))
+            negative = _safe_refine(negative.cut(groove).cut(lip))
 
     if not negative.isValid() or not positive.isValid():
         raise RuntimeError(
@@ -1203,9 +1319,11 @@ def make_enclosure(
     return EnclosureResult(
         negative=negative,
         positive=positive,
-        lip=lip_volume,
-        groove=groove_volume,
+        lip=_combine(lips),
+        groove=_combine(grooves),
         section=section,
         plane=plane_face,
-        internal_wires=wires,
+        internal_wires=groups["negative"] + groups["positive"],
+        contour_sides=assignments,
+        root_clearance=_combine(root_clearances),
     )

@@ -129,6 +129,63 @@ class GeometryTests(unittest.TestCase):
             interference_volume = 0.0
         self.assertLess(interference_volume, 1e-6)
 
+    def test_each_contour_can_choose_its_lip_half(self):
+        source = hollow_box(open_top=False)
+        origin, normal = plane_from_axes("XY", 10)
+        _section, _plane, contours = analyze_section_contours(
+            source, origin, normal
+        )
+        self.assertEqual(len(contours), 2)
+        result = make_enclosure(
+            source,
+            origin,
+            normal,
+            lip_width=0.7,
+            lip_height=1.2,
+            clearance=0.2,
+            vertical_clearance=0.2,
+            contour_sides={0: "negative", 1: "positive"},
+        )
+        self.assertEqual(
+            result.contour_sides,
+            {0: "negative", 1: "positive"},
+        )
+        self.assertEqual(len(result.internal_wires), 2)
+        self.assert_valid_pair(source, result)
+
+    def test_depth_clearance_is_shared_between_tip_and_root(self):
+        source = hollow_box(open_top=False)
+        origin, normal = plane_from_axes("XY", 10)
+        without_clearance = make_enclosure(
+            source,
+            origin,
+            normal,
+            lip_width=0.7,
+            lip_height=1.2,
+            clearance=0.2,
+            vertical_clearance=0.0,
+            contour_mode="outer",
+        )
+        symmetric = make_enclosure(
+            source,
+            origin,
+            normal,
+            lip_width=0.7,
+            lip_height=1.2,
+            clearance=0.2,
+            vertical_clearance=0.4,
+            contour_mode="outer",
+        )
+        self.assertTrue(without_clearance.root_clearance.isNull())
+        self.assertGreater(symmetric.root_clearance.Volume, 0.0)
+        self.assertAlmostEqual(
+            without_clearance.lip.Volume,
+            symmetric.lip.Volume,
+            places=6,
+        )
+        self.assertLess(symmetric.negative.Volume, without_clearance.negative.Volume)
+        self.assertLess(symmetric.positive.Volume, without_clearance.positive.Volume)
+
     def test_failed_optional_refinement_keeps_original_shape(self):
         class RefinementFailure:
             def isNull(self):
