@@ -13,7 +13,9 @@ if not os.environ.get("SPLIT2ENCLOSURE_TEST_INSTALLED") and PROJECT_ROOT not in 
 from split2enclosure.geometry import (
     _safe_refine,
     analyze_section_contours,
+    analyze_sketch_contours,
     make_enclosure,
+    make_enclosure_with_sketch,
     plane_from_axes,
     split_with_sketch,
 )
@@ -73,6 +75,48 @@ class GeometryTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "one connected"):
             split_with_sketch(source, disconnected, App.Vector(0, 0, 1))
+
+    def test_ruled_sketch_split_adds_valid_lip_and_groove(self):
+        outer = Part.makeBox(40, 30, 20, App.Vector(-20, -15, -10))
+        inner = Part.makeBox(36, 26, 16, App.Vector(-18, -13, -8))
+        source = outer.cut(inner)
+        path = Part.makePolygon(
+            [
+                App.Vector(-25, -2, 0),
+                App.Vector(-4, -2, 0),
+                App.Vector(3, 5, 0),
+                App.Vector(9, 5, 0),
+                App.Vector(13, -4, 0),
+                App.Vector(25, -4, 0),
+            ]
+        )
+        split, contours = analyze_sketch_contours(
+            source, path, App.Vector(0, 0, 1)
+        )
+        self.assertEqual(len(split.negative.Solids), 1)
+        self.assertTrue(any(contour.kind == "outer" for contour in contours))
+        result = make_enclosure_with_sketch(
+            source,
+            path,
+            App.Vector(0, 0, 1),
+            lip_width=0.8,
+            lip_height=1.2,
+            clearance=0.2,
+            vertical_clearance=0.2,
+            contour_mode="outer",
+        )
+        self.assertTrue(result.negative.isValid())
+        self.assertTrue(result.positive.isValid())
+        self.assertEqual(len(result.negative.Solids), 1)
+        self.assertEqual(len(result.positive.Solids), 1)
+        self.assertGreater(result.lip.Volume, 0)
+        try:
+            interference = result.negative.common(result.positive)
+            interference_volume = 0.0 if interference.isNull() else interference.Volume
+        except ValueError as exc:
+            self.assertIn("Null shape", str(exc))
+            interference_volume = 0.0
+        self.assertLess(interference_volume, 1e-6)
 
     def test_failed_optional_refinement_keeps_original_shape(self):
         class RefinementFailure:

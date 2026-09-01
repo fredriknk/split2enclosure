@@ -125,6 +125,31 @@ def _combine(shapes):
     return Part.makeCompound([shape.copy() for shape in shapes])
 
 
+def _fuse_shapes(shapes):
+    shapes = [shape for shape in shapes if not shape.isNull()]
+    if not shapes:
+        return Part.Shape()
+    result = shapes[0].copy()
+    for shape in shapes[1:]:
+        result = result.fuse(shape)
+    return _safe_refine(result)
+
+
+def _discard_boolean_slivers(shape, tolerance):
+    """Drop zero-volume OCC artifacts while retaining real result solids."""
+
+    if shape is None or shape.isNull():
+        return shape
+    # A groove Boolean at a sharp ruled-surface mitre can leave a detached
+    # microscopic wedge. Enclosure halves are required to stay connected, so
+    # discard components below one thousandth of the result volume.
+    threshold = max(abs(shape.Volume) * 1e-3, tolerance ** 3 * 1000, 1e-9)
+    solids = [solid for solid in shape.Solids if solid.Volume > threshold]
+    if not solids:
+        return shape
+    return _combine(solids)
+
+
 def _safe_refine(shape):
     """Remove redundant split edges when OCC can do so safely.
 
@@ -170,6 +195,10 @@ def _open_sketch_wire(sketch_shape, tolerance=DEFAULT_TOLERANCE):
         raise ValueError("The split sketch must be open, not a closed profile.")
     if len(wire.Vertexes) < 2:
         raise ValueError("The split sketch does not define a usable path.")
+    if any(not isinstance(edge.Curve, Part.Line) for edge in wire.Edges):
+        raise ValueError(
+            "Sketch splits currently support connected line segments only."
+        )
     return wire
 
 
@@ -267,6 +296,446 @@ def split_with_sketch(
         surface=surface,
         sketch_wire=sketch_wire,
         extrusion_normal=extrusion_normal,
+    )
+
+
+def _free_section_edges(section):
+    return [
+        edge
+        for edge in section.Edges
+        if len(section.ancestorsOfType(edge, Part.Face)) == 1
+    ]
+
+
+def _connected_closed_wires(edges, tolerance):
+    """Join unordered boundary edges into non-branching closed wires."""
+
+    tolerance = max(float(tolerance), DEFAULT_TOLERANCE) * 100
+    nodes = []
+
+    def node_for(point):
+        for index, existing in enumerate(nodes):
+            if (point - existing).Length <= tolerance:
+                return index
+        nodes.append(App.Vector(point))
+        return len(nodes) - 1
+
+    edge_nodes = []
+    separate_loops = []
+    graph_edges = []
+    for edge in edges:
+        vertices = edge.Vertexes
+        if len(vertices) == 1:
+            separate_loops.append(Part.Wire([edge.copy()]))
+            continue
+        if len(vertices) < 2:
+            continue
+        first = node_for(vertices[0].Point)
+        second = node_for(vertices[-1].Point)
+        edge_nodes.append((first, second))
+        graph_edges.append(edge)
+
+    adjacency = {index: [] for index in range(len(nodes))}
+    for edge_index, (first, second) in enumerate(edge_nodes):
+        adjacency[first].append(edge_index)
+        adjacency[second].append(edge_index)
+
+    unused = set(range(len(graph_edges)))
+    wires = list(separate_loops)
+    while unused:
+        seed = next(iter(unused))
+        component_edges = set()
+        pending = [seed]
+        while pending:
+            edge_index = pending.pop()
+            if edge_index in component_edges:
+                continue
+            component_edges.add(edge_index)
+            first, second = edge_nodes[edge_index]
+            pending.extend(adjacency[first])
+            pending.extend(adjacency[second])
+        unused.difference_update(component_edges)
+        component_nodes = {
+            node
+            for edge_index in component_edges
+            for node in edge_nodes[edge_index]
+        }
+        if any(
+            len([edge for edge in adjacency[node] if edge in component_edges]) != 2
+            for node in component_nodes
+        ):
+            continue
+
+        ordered = []
+        current_edge = seed
+        current_node = edge_nodes[seed][0]
+        remaining = set(component_edges)
+        while remaining:
+            if current_edge not in remaining:
+                break
+            edge = graph_edges[current_edge].copy()
+            first, second = edge_nodes[current_edge]
+            if first == current_node:
+                next_node = second
+            else:
+                edge.reverse()
+                next_node = first
+            ordered.append(edge)
+            remaining.remove(current_edge)
+            candidates = [
+                index
+                for index in adjacency[next_node]
+                if index in remaining
+            ]
+            current_node = next_node
+            if not candidates:
+                break
+            current_edge = candidates[0]
+        if not remaining and ordered:
+            wire = Part.Wire(ordered)
+            if wire.isClosed():
+                wires.append(wire)
+    return wires
+
+
+def _wire_samples(wire, deflection=0.1):
+    points = wire.discretize(Deflection=max(float(deflection), 0.01))
+    cleaned = []
+    for point in points:
+        if not cleaned or (point - cleaned[-1]).Length > DEFAULT_TOLERANCE:
+            cleaned.append(point)
+    if cleaned and (cleaned[0] - cleaned[-1]).Length > DEFAULT_TOLERANCE:
+        cleaned.append(cleaned[0])
+    return cleaned
+
+
+def _base_path_samples(wire):
+    samples = []
+    cumulative = []
+    distance = 0.0
+    for edge in wire.Edges:
+        points = edge.discretize(Deflection=0.05)
+        if samples and points:
+            if (samples[-1] - points[-1]).Length < (samples[-1] - points[0]).Length:
+                points.reverse()
+        for point in points:
+            if samples and (samples[-1] - point).Length <= DEFAULT_TOLERANCE:
+                continue
+            if samples:
+                distance += (point - samples[-1]).Length
+            samples.append(point)
+            cumulative.append(distance)
+    return samples, cumulative
+
+
+def _unfold_point(point, base_samples, cumulative, extrusion_normal):
+    height = (point - base_samples[0]).dot(extrusion_normal)
+    projected = point - extrusion_normal * height
+    best_distance = None
+    best_s = 0.0
+    for index in range(len(base_samples) - 1):
+        start = base_samples[index]
+        segment = base_samples[index + 1] - start
+        length_squared = segment.dot(segment)
+        if length_squared <= DEFAULT_TOLERANCE:
+            continue
+        fraction = max(0.0, min(1.0, (projected - start).dot(segment) / length_squared))
+        nearest = start + segment * fraction
+        distance = (projected - nearest).Length
+        if best_distance is None or distance < best_distance:
+            best_distance = distance
+            best_s = cumulative[index] + segment.Length * fraction
+    return best_s, height
+
+
+def _classify_ruled_contours(wires, sketch_wire, extrusion_normal, tolerance):
+    from shapely.geometry import Polygon
+
+    base_samples, cumulative = _base_path_samples(sketch_wire)
+    polygons = []
+    valid_wires = []
+    for wire in wires:
+        coordinates = [
+            _unfold_point(point, base_samples, cumulative, extrusion_normal)
+            for point in _wire_samples(wire)
+        ]
+        polygon = Polygon(coordinates)
+        if not polygon.is_valid:
+            polygon = polygon.buffer(0)
+        if polygon.is_empty or polygon.area <= tolerance * tolerance:
+            continue
+        valid_wires.append(wire)
+        polygons.append(polygon)
+
+    classified = []
+    for index, (wire, polygon) in enumerate(zip(valid_wires, polygons)):
+        representative = polygon.representative_point()
+        depth = sum(
+            1
+            for other_index, other in enumerate(polygons)
+            if other_index != index
+            and other.area > polygon.area + tolerance
+            and other.contains(representative)
+        )
+        classified.append(
+            ("outer" if depth % 2 == 0 else "internal", wire, polygon.area)
+        )
+    classified.sort(key=lambda item: (item[0] != "outer", -item[2]))
+    return [
+        ContourInfo(
+            index=index,
+            kind=kind,
+            wire=wire,
+            area=area,
+            length=wire.Length,
+        )
+        for index, (kind, wire, area) in enumerate(classified)
+    ]
+
+
+def analyze_sketch_contours(
+    shape,
+    sketch_shape,
+    sketch_normal,
+    tolerance=DEFAULT_TOLERANCE,
+):
+    """Return a sketch split plus selectable seam-boundary contours."""
+
+    split = split_with_sketch(shape, sketch_shape, sketch_normal, tolerance)
+    wires = _connected_closed_wires(
+        _free_section_edges(split.section), tolerance
+    )
+    contours = _classify_ruled_contours(
+        wires, split.sketch_wire, split.extrusion_normal, tolerance
+    )
+    if not contours:
+        raise ValueError("No closed joint contours were found on the sketch seam.")
+    return split, contours
+
+
+def _planar_face_basis(face):
+    if not isinstance(face.Surface, Part.Plane):
+        raise ValueError("Sketch-seam joint panels must be planar.")
+    u_min, u_max, v_min, v_max = face.ParameterRange
+    point = face.valueAt((u_min + u_max) * 0.5, (v_min + v_max) * 0.5)
+    normal = face.normalAt((u_min + u_max) * 0.5, (v_min + v_max) * 0.5)
+    normal.normalize()
+    helper = App.Vector(0, 0, 1)
+    if abs(normal.dot(helper)) > 0.9:
+        helper = App.Vector(1, 0, 0)
+    axis_u = normal.cross(helper)
+    axis_u.normalize()
+    axis_v = normal.cross(axis_u)
+    axis_v.normalize()
+    return point, axis_u, axis_v
+
+
+def _edge_band_on_face(face, edges, distance, tolerance):
+    from shapely.geometry import LineString
+    from shapely.ops import unary_union
+
+    if not edges:
+        return Part.Shape()
+    origin, axis_u, axis_v = _planar_face_basis(face)
+    lines = []
+    for edge in edges:
+        coordinates = []
+        for point in edge.discretize(Deflection=max(min(distance * 0.05, 0.05), 0.01)):
+            relative = point - origin
+            coordinate = (relative.dot(axis_u), relative.dot(axis_v))
+            if not coordinates or coordinate != coordinates[-1]:
+                coordinates.append(coordinate)
+        if len(coordinates) >= 2:
+            lines.append(LineString(coordinates))
+    if not lines:
+        return Part.Shape()
+    buffered = unary_union(lines).buffer(
+        distance,
+        quad_segs=10,
+        cap_style=2,
+        join_style=2,
+        mitre_limit=5.0,
+    )
+    polygons = [buffered] if buffered.geom_type == "Polygon" else list(buffered.geoms)
+    faces = []
+    for polygon in polygons:
+        if polygon.geom_type != "Polygon":
+            continue
+        converted = _polygon_face_from_shapely(
+            polygon, origin, axis_u, axis_v, tolerance
+        )
+        if not converted.isNull() and converted.Faces:
+            faces.extend(converted.Faces)
+    if not faces:
+        return Part.Shape()
+    return _combine_faces(faces).common(face)
+
+
+def _matching_surface_face(section_face, surface, tolerance):
+    point = section_face.CenterOfMass
+    vertex = Part.Vertex(point)
+    candidates = sorted(
+        surface.Faces,
+        key=lambda face: face.distToShape(vertex)[0],
+    )
+    if not candidates or candidates[0].distToShape(vertex)[0] > tolerance * 100:
+        raise RuntimeError("Could not match a seam section panel to the sketch surface.")
+    return candidates[0]
+
+
+def _same_geometric_edge(first, second, tolerance):
+    length_tolerance = max(first.Length, second.Length, 1.0) * 1e-7
+    return (
+        abs(first.Length - second.Length) <= max(length_tolerance, tolerance * 10)
+        and first.distToShape(second)[0] <= tolerance * 100
+    )
+
+
+def _ruled_joint_volumes(
+    split,
+    selected_wires,
+    lip_width,
+    lip_height,
+    clearance,
+    vertical_clearance,
+    lip_on,
+    tolerance,
+):
+    selected_edges = [edge for wire in selected_wires for edge in wire.Edges]
+    receiver = split.positive if lip_on == "negative" else split.negative
+    lip_parts = []
+    groove_parts = []
+    epsilon = max(split.section.BoundBox.DiagonalLength * 1e-6, tolerance * 10)
+    for section_face in split.section.Faces:
+        boundary_edges = [
+            edge
+            for edge in section_face.Edges
+            if any(
+                edge.isSame(selected)
+                or _same_geometric_edge(edge, selected, tolerance)
+                for selected in selected_edges
+            )
+        ]
+        if not boundary_edges:
+            continue
+        lip_band = _edge_band_on_face(
+            section_face, boundary_edges, lip_width, tolerance
+        )
+        groove_band = _edge_band_on_face(
+            section_face, boundary_edges, lip_width + clearance, tolerance
+        )
+        if lip_band.isNull() or not lip_band.Faces:
+            continue
+        surface_face = _matching_surface_face(section_face, split.surface, tolerance)
+        point = section_face.CenterOfMass
+        normal = _surface_normal_at_face(surface_face, point)
+        if not split.positive.isInside(point + normal * epsilon, tolerance, True):
+            normal = -normal
+        direction = normal if lip_on == "negative" else -normal
+        lip_piece = _extrude_faces(lip_band, direction * lip_height)
+        groove_piece = _extrude_faces(
+            groove_band,
+            direction * (lip_height + vertical_clearance + tolerance * 2),
+        )
+        groove_piece.translate(-direction * tolerance)
+        if not lip_piece.isNull():
+            lip_parts.extend(lip_piece.Solids)
+        if not groove_piece.isNull():
+            groove_parts.extend(groove_piece.Solids)
+
+    if not lip_parts or not groove_parts:
+        raise ValueError("No lip/groove volume fits along the selected sketch seam.")
+    raw_lip = _fuse_shapes(lip_parts)
+    raw_groove = _combine(groove_parts)
+    lip = _safe_refine(raw_lip.common(receiver))
+    if lip.isNull() or not lip.Solids:
+        raise ValueError("The receiving half contains no material for the sketch-seam lip.")
+    # Adjacent ruled panels use different local normals. Their prisms can form
+    # tiny mitre wedges at a sketch corner, so explicitly include the exact
+    # transferred lip in the wider/deeper groove tool. This guarantees that
+    # the two completed halves cannot retain overlapping corner material.
+    groove = raw_groove
+    return lip, groove
+
+
+def make_enclosure_with_sketch(
+    shape,
+    sketch_shape,
+    sketch_normal,
+    lip_width=1.0,
+    lip_height=2.0,
+    clearance=0.2,
+    vertical_clearance=0.2,
+    lip_on="negative",
+    contour_mode="outer",
+    contour_indices=None,
+    tolerance=DEFAULT_TOLERANCE,
+):
+    """Split on an extruded open sketch and add a face-relative lip/groove."""
+
+    lip_width = float(lip_width)
+    lip_height = float(lip_height)
+    clearance = float(clearance)
+    vertical_clearance = float(vertical_clearance)
+    tolerance = max(float(tolerance), DEFAULT_TOLERANCE)
+    if lip_width <= 0 or lip_height <= 0:
+        raise ValueError("Lip width and height must be greater than zero.")
+    if clearance < 0 or vertical_clearance < 0:
+        raise ValueError("Clearances must not be negative.")
+    if lip_on not in ("negative", "positive"):
+        raise ValueError("lip_on must be 'negative' or 'positive'.")
+    if contour_mode not in ("outer", "internal"):
+        raise ValueError("contour_mode must be 'outer' or 'internal'.")
+
+    split, contours = analyze_sketch_contours(
+        shape, sketch_shape, sketch_normal, tolerance
+    )
+    if contour_indices is None:
+        wires = [contour.wire for contour in contours if contour.kind == contour_mode]
+    else:
+        indices = []
+        for value in contour_indices:
+            index = int(value)
+            if index not in indices:
+                indices.append(index)
+        if any(index < 0 or index >= len(contours) for index in indices):
+            raise ValueError("A selected sketch contour is no longer available.")
+        wires = [contours[index].wire for index in indices]
+    if not wires:
+        raise ValueError("Select at least one sketch-seam contour for the joint.")
+
+    lip, groove = _ruled_joint_volumes(
+        split,
+        wires,
+        lip_width,
+        lip_height,
+        clearance,
+        vertical_clearance,
+        lip_on,
+        tolerance,
+    )
+    negative = split.negative
+    positive = split.positive
+    if lip_on == "negative":
+        negative = _safe_refine(negative.fuse(lip))
+        positive = _safe_refine(positive.cut(groove).cut(lip))
+    else:
+        positive = _safe_refine(positive.fuse(lip))
+        negative = _safe_refine(negative.cut(groove).cut(lip))
+    negative = _discard_boolean_slivers(negative, tolerance)
+    positive = _discard_boolean_slivers(positive, tolerance)
+    if not negative.isValid() or not positive.isValid():
+        raise RuntimeError(
+            "OpenCASCADE produced an invalid sketch-seam joint. Try smaller joint dimensions."
+        )
+    return EnclosureResult(
+        negative=negative,
+        positive=positive,
+        lip=lip,
+        groove=groove,
+        section=split.section,
+        plane=split.surface,
+        internal_wires=wires,
     )
 
 

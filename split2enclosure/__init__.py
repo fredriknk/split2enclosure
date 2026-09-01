@@ -5,7 +5,9 @@ from .geometry import (
     EnclosureResult,
     SketchSplitResult,
     analyze_section_contours,
+    analyze_sketch_contours,
     make_enclosure,
+    make_enclosure_with_sketch,
     plane_from_axes,
     split_with_sketch,
 )
@@ -15,7 +17,9 @@ __all__ = [
     "EnclosureResult",
     "SketchSplitResult",
     "analyze_section_contours",
+    "analyze_sketch_contours",
     "make_enclosure",
+    "make_enclosure_with_sketch",
     "plane_from_axes",
     "split_with_sketch",
 ]
