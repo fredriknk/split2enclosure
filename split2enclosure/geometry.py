@@ -29,6 +29,8 @@ class EnclosureResult:
     internal_wires: list
     contour_sides: dict = None
     root_clearance: Part.Shape = None
+    snap_features: Part.Shape = None
+    contour_snaps: dict = None
 
 
 @dataclass
@@ -717,6 +719,84 @@ def _contour_groups(
     return groups, normalized
 
 
+def _normalized_snap_assignments(contours, contour_snaps):
+    if contour_snaps is None:
+        return {contour.index: False for contour in contours}
+    items = (
+        contour_snaps.items()
+        if hasattr(contour_snaps, "items")
+        else enumerate(contour_snaps)
+    )
+    requested = {int(index): bool(enabled) for index, enabled in items}
+    if any(index < 0 or index >= len(contours) for index in requested):
+        raise ValueError("A snap contour index is no longer available.")
+    return {
+        contour.index: requested.get(contour.index, False)
+        for contour in contours
+    }
+
+
+def _wire_point_and_tangent(wire):
+    points = wire.discretize(Number=37)
+    if len(points) < 3:
+        raise ValueError("The contour is too short for a snap feature.")
+    index = max(1, min(len(points) - 2, len(points) // 3))
+    tangent = points[index + 1] - points[index - 1]
+    tangent.normalize()
+    return points[index], tangent
+
+
+def _point_in_section(section, point, tolerance):
+    return any(face.isInside(point, tolerance * 100, True) for face in section.Faces)
+
+
+def _snap_for_contour(
+    section,
+    wire,
+    positive_direction,
+    lip_on,
+    lip_width,
+    lip_height,
+    snap_radius,
+    snap_clearance,
+    snap_position,
+    receiver,
+    lip,
+    tolerance,
+):
+    point, tangent = _wire_point_and_tangent(wire)
+    positive_direction = _unit(positive_direction)
+    extrusion_direction = (
+        positive_direction if lip_on == "negative" else -positive_direction
+    )
+    material_direction = positive_direction.cross(tangent)
+    if material_direction.Length <= tolerance:
+        material_direction = tangent.cross(positive_direction)
+    material_direction.normalize()
+    probe = max(lip_width * 0.35, tolerance * 100)
+    if not _point_in_section(
+        section, point + material_direction * probe, tolerance
+    ):
+        material_direction = -material_direction
+
+    center = (
+        point
+        + material_direction * (lip_width * 0.5)
+        + extrusion_direction * (lip_height * snap_position)
+    )
+    sphere = Part.makeSphere(snap_radius, center)
+    bump = _safe_refine(sphere.common(receiver))
+    if bump.isNull() or not bump.Solids:
+        raise ValueError("The snap nub does not intersect receiving-half material.")
+    attachment = bump.common(lip)
+    if attachment.isNull() or attachment.Volume <= tolerance ** 3:
+        raise ValueError(
+            "The snap nub does not attach to the lip. Increase snap radius or lip width."
+        )
+    pocket = Part.makeSphere(snap_radius + snap_clearance, center)
+    return bump, pocket
+
+
 def _ruled_joint_volumes(
     split,
     selected_wires,
@@ -835,6 +915,10 @@ def make_enclosure_with_sketch(
     contour_mode="outer",
     contour_indices=None,
     contour_sides=None,
+    contour_snaps=None,
+    snap_radius=0.6,
+    snap_clearance=0.15,
+    snap_position=0.7,
     tolerance=DEFAULT_TOLERANCE,
 ):
     """Split on an extruded open sketch and add a face-relative lip/groove."""
@@ -844,6 +928,9 @@ def make_enclosure_with_sketch(
     clearance = float(clearance)
     vertical_clearance = float(vertical_clearance)
     draft_angle = float(draft_angle)
+    snap_radius = float(snap_radius)
+    snap_clearance = float(snap_clearance)
+    snap_position = float(snap_position)
     tolerance = max(float(tolerance), DEFAULT_TOLERANCE)
     if lip_width <= 0 or lip_height <= 0:
         raise ValueError("Lip width and height must be greater than zero.")
@@ -851,6 +938,10 @@ def make_enclosure_with_sketch(
         raise ValueError("Clearances must not be negative.")
     if draft_angle < 0 or draft_angle >= 45:
         raise ValueError("Draft angle must be at least 0 and less than 45 degrees.")
+    if snap_radius <= 0 or snap_clearance < 0:
+        raise ValueError("Snap radius must be positive and snap clearance non-negative.")
+    if not 0.1 <= snap_position <= 0.9:
+        raise ValueError("Snap position must be between 0.1 and 0.9 of lip height.")
     if lip_on not in ("negative", "positive"):
         raise ValueError("lip_on must be 'negative' or 'positive'.")
     if contour_mode not in ("outer", "internal"):
@@ -862,11 +953,13 @@ def make_enclosure_with_sketch(
     groups, assignments = _contour_groups(
         contours, contour_sides, contour_indices, lip_on, contour_mode
     )
+    snap_assignments = _normalized_snap_assignments(contours, contour_snaps)
     negative = split.negative
     positive = split.positive
     lips = []
     grooves = []
     root_clearances = []
+    side_lips = {}
     for side in ("negative", "positive"):
         wires = groups[side]
         if not wires:
@@ -883,6 +976,7 @@ def make_enclosure_with_sketch(
             tolerance,
         )
         lips.append(lip)
+        side_lips[side] = lip
         grooves.append(groove)
         if root_clearance is not None and not root_clearance.isNull():
             root_clearances.append(root_clearance)
@@ -898,6 +992,37 @@ def make_enclosure_with_sketch(
             positive = _safe_refine(positive.fuse(lip))
             negative = _cut_tool_solids(negative, groove)
             negative = _safe_refine(negative.cut(lip))
+
+    snap_features = []
+    for contour in contours:
+        side = assignments[contour.index]
+        if side == "none" or not snap_assignments[contour.index]:
+            continue
+        positive_direction = ruled_contour_positive_direction(
+            split, contour.wire, tolerance
+        )
+        receiver = split.positive if side == "negative" else split.negative
+        bump, pocket = _snap_for_contour(
+            split.section,
+            contour.wire,
+            positive_direction,
+            side,
+            lip_width,
+            lip_height,
+            snap_radius,
+            snap_clearance,
+            snap_position,
+            receiver,
+            side_lips[side],
+            tolerance,
+        )
+        snap_features.append(bump)
+        if side == "negative":
+            negative = _safe_refine(negative.fuse(bump))
+            positive = _safe_refine(positive.cut(pocket).cut(bump))
+        else:
+            positive = _safe_refine(positive.fuse(bump))
+            negative = _safe_refine(negative.cut(pocket).cut(bump))
     negative = _discard_boolean_slivers(negative, tolerance, keep_largest=True)
     positive = _discard_boolean_slivers(positive, tolerance, keep_largest=True)
     if not negative.isValid() or not positive.isValid():
@@ -914,6 +1039,8 @@ def make_enclosure_with_sketch(
         internal_wires=groups["negative"] + groups["positive"],
         contour_sides=assignments,
         root_clearance=_combine(root_clearances),
+        snap_features=_combine(snap_features),
+        contour_snaps=snap_assignments,
     )
 
 
@@ -1381,6 +1508,10 @@ def make_enclosure(
     contour_mode="internal",
     contour_indices=None,
     contour_sides=None,
+    contour_snaps=None,
+    snap_radius=0.6,
+    snap_clearance=0.15,
+    snap_position=0.7,
     tolerance=DEFAULT_TOLERANCE,
 ):
     """Split ``shape`` and add a matched lip/groove joint.
@@ -1409,6 +1540,9 @@ def make_enclosure(
     clearance = float(clearance)
     vertical_clearance = float(vertical_clearance)
     draft_angle = float(draft_angle)
+    snap_radius = float(snap_radius)
+    snap_clearance = float(snap_clearance)
+    snap_position = float(snap_position)
     tolerance = max(float(tolerance), DEFAULT_TOLERANCE)
     if lip_width <= 0 or lip_height <= 0:
         raise ValueError("Lip width and height must be greater than zero.")
@@ -1416,6 +1550,10 @@ def make_enclosure(
         raise ValueError("Clearances must not be negative.")
     if draft_angle < 0 or draft_angle >= 45:
         raise ValueError("Draft angle must be at least 0 and less than 45 degrees.")
+    if snap_radius <= 0 or snap_clearance < 0:
+        raise ValueError("Snap radius must be positive and snap clearance non-negative.")
+    if not 0.1 <= snap_position <= 0.9:
+        raise ValueError("Snap position must be between 0.1 and 0.9 of lip height.")
     if lip_on not in ("negative", "positive"):
         raise ValueError("lip_on must be 'negative' or 'positive'.")
     if contour_mode not in ("outer", "internal"):
@@ -1429,6 +1567,7 @@ def make_enclosure(
     groups, assignments = _contour_groups(
         contours, contour_sides, contour_indices, lip_on, contour_mode
     )
+    snap_assignments = _normalized_snap_assignments(contours, contour_snaps)
 
     negative, positive = _split_sides(
         shape, plane_face, origin, normal, tolerance
@@ -1438,6 +1577,7 @@ def make_enclosure(
     lips = []
     grooves = []
     root_clearances = []
+    side_lips = {}
     for side in ("negative", "positive"):
         wires = groups[side]
         if not wires:
@@ -1457,6 +1597,7 @@ def make_enclosure(
             tolerance,
         )
         lips.append(lip)
+        side_lips[side] = lip
         grooves.append(groove)
         if not root_clearance.isNull():
             root_clearances.append(root_clearance)
@@ -1472,6 +1613,34 @@ def make_enclosure(
             positive = _safe_refine(positive.fuse(lip))
             negative = _cut_tool_solids(negative, groove)
             negative = _safe_refine(negative.cut(lip))
+
+    snap_features = []
+    for contour in contours:
+        side = assignments[contour.index]
+        if side == "none" or not snap_assignments[contour.index]:
+            continue
+        receiver = base_positive if side == "negative" else base_negative
+        bump, pocket = _snap_for_contour(
+            section,
+            contour.wire,
+            normal,
+            side,
+            lip_width,
+            lip_height,
+            snap_radius,
+            snap_clearance,
+            snap_position,
+            receiver,
+            side_lips[side],
+            tolerance,
+        )
+        snap_features.append(bump)
+        if side == "negative":
+            negative = _safe_refine(negative.fuse(bump))
+            positive = _safe_refine(positive.cut(pocket).cut(bump))
+        else:
+            positive = _safe_refine(positive.fuse(bump))
+            negative = _safe_refine(negative.cut(pocket).cut(bump))
 
     if not negative.isValid() or not positive.isValid():
         raise RuntimeError(
@@ -1489,4 +1658,6 @@ def make_enclosure(
         internal_wires=groups["negative"] + groups["positive"],
         contour_sides=assignments,
         root_clearance=_combine(root_clearances),
+        snap_features=_combine(snap_features),
+        contour_snaps=snap_assignments,
     )

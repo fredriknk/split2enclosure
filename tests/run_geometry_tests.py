@@ -246,6 +246,56 @@ class GeometryTests(unittest.TestCase):
         self.assertEqual(result.contour_sides[1], "positive")
         self.assertGreater(result.lip.Volume, 0.0)
 
+    def test_per_contour_snap_nub_has_matching_clearance_pocket(self):
+        source = hollow_box(open_top=False)
+        origin, normal = plane_from_axes("XY", 10)
+        result = make_enclosure(
+            source,
+            origin,
+            normal,
+            lip_width=1.0,
+            lip_height=2.0,
+            clearance=0.25,
+            vertical_clearance=0.2,
+            contour_sides={0: "negative"},
+            contour_snaps={0: True},
+            snap_radius=0.65,
+            snap_clearance=0.15,
+            snap_position=0.7,
+        )
+        self.assertTrue(result.contour_snaps[0])
+        self.assertGreater(result.snap_features.Volume, 0.0)
+        self.assertTrue(result.negative.isValid())
+        self.assertTrue(result.positive.isValid())
+        try:
+            overlap = result.negative.common(result.positive)
+            overlap_volume = 0.0 if overlap.isNull() else overlap.Volume
+        except ValueError:
+            overlap_volume = 0.0
+        self.assertLess(overlap_volume, 1e-6)
+
+    def test_snap_nub_works_on_sketch_seam(self):
+        outer = Part.makeBox(40, 30, 20, App.Vector(-20, -15, -10))
+        inner = Part.makeBox(36, 26, 16, App.Vector(-18, -13, -8))
+        source = outer.cut(inner)
+        path = Part.makePolygon(
+            [App.Vector(-25, 0, 0), App.Vector(0, 3, 0), App.Vector(25, 3, 0)]
+        )
+        result = make_enclosure_with_sketch(
+            source,
+            path,
+            App.Vector(0, 0, 1),
+            lip_width=1.0,
+            lip_height=1.5,
+            contour_sides={0: "negative"},
+            contour_snaps={0: True},
+            snap_radius=0.65,
+            snap_clearance=0.15,
+        )
+        self.assertGreater(result.snap_features.Volume, 0.0)
+        self.assertEqual(len(result.negative.Solids), 1)
+        self.assertEqual(len(result.positive.Solids), 1)
+
     def test_failed_optional_refinement_keeps_original_shape(self):
         class RefinementFailure:
             def isNull(self):
