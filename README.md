@@ -158,6 +158,11 @@ derived directly from the final solid.
 - Draft angle is not yet applied; lip walls follow the receiving half's local
   geometry but the limiting prism is normal to the plane or each ruled-surface
   panel.
+ 
+## TODO
+ [] Fix lip clearance on both top and bottom half ceiling and roof, now it only adds clearance to the receiving half.
+ [] Add optional draft angle to lip and groove.
+ [] Add better support for sketch splits, it works now but barely 
 
 ## Tests and sample
 
