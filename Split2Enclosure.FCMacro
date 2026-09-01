@@ -1,0 +1,12 @@
+"""Launch the Split2Enclosure dialog from an installed add-on folder."""
+
+try:
+    from split2enclosure.command import run
+except ImportError as exc:
+    raise RuntimeError(
+        "Install the complete Split2Enclosure folder in FreeCAD's Mod directory; "
+        "the macro launcher cannot run without its geometry package."
+    ) from exc
+
+run()
+
