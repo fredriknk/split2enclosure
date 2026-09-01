@@ -176,3 +176,6 @@ Generate a visual `.FCStd` example:
 ## License
 
 Split2Enclosure is released under the [MIT License](LICENSE).
+
+## Disclaimer
+This work is made with openai codex, and i am a hobbyist who needed this functionality. I am not a professional software developer. Use at your own risk. 
