@@ -1,5 +1,7 @@
 """Split2Enclosure FreeCAD add-on."""
 
+__version__ = "0.4.0"
+
 from .geometry import (
     ContourInfo,
     EnclosureResult,
@@ -14,6 +16,7 @@ from .geometry import (
 )
 
 __all__ = [
+    "__version__",
     "ContourInfo",
     "EnclosureResult",
     "SketchSplitResult",
