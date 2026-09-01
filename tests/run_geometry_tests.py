@@ -15,6 +15,7 @@ from split2enclosure.geometry import (
     analyze_section_contours,
     make_enclosure,
     plane_from_axes,
+    split_with_sketch,
 )
 
 
@@ -26,6 +27,53 @@ def hollow_box(open_top=True):
 
 
 class GeometryTests(unittest.TestCase):
+    def test_open_sketch_ruled_surface_splits_into_two_valid_solids(self):
+        source = Part.makeBox(40, 30, 20, App.Vector(-20, -15, -10))
+        path = Part.makePolygon(
+            [
+                App.Vector(-25, -2, 0),
+                App.Vector(-4, -2, 0),
+                App.Vector(3, 5, 0),
+                App.Vector(9, 5, 0),
+                App.Vector(13, -4, 0),
+                App.Vector(25, -4, 0),
+            ]
+        )
+        result = split_with_sketch(source, path, App.Vector(0, 0, 1))
+        self.assertTrue(result.negative.isValid())
+        self.assertTrue(result.positive.isValid())
+        self.assertEqual(len(result.negative.Solids), 1)
+        self.assertEqual(len(result.positive.Solids), 1)
+        self.assertAlmostEqual(
+            result.negative.Volume + result.positive.Volume,
+            source.Volume,
+            places=5,
+        )
+        self.assertEqual(len(result.surface.Faces), 5)
+
+    def test_sketch_split_rejects_closed_and_disconnected_paths(self):
+        source = Part.makeBox(10, 10, 10)
+        closed = Part.makePolygon(
+            [
+                App.Vector(-1, -1, 0),
+                App.Vector(11, -1, 0),
+                App.Vector(11, 11, 0),
+                App.Vector(-1, 11, 0),
+                App.Vector(-1, -1, 0),
+            ]
+        )
+        with self.assertRaisesRegex(ValueError, "must be open"):
+            split_with_sketch(source, closed, App.Vector(0, 0, 1))
+
+        disconnected = Part.makeCompound(
+            [
+                Part.makeLine(App.Vector(-1, 4, 0), App.Vector(4, 4, 0)),
+                Part.makeLine(App.Vector(6, 4, 0), App.Vector(11, 4, 0)),
+            ]
+        )
+        with self.assertRaisesRegex(ValueError, "one connected"):
+            split_with_sketch(source, disconnected, App.Vector(0, 0, 1))
+
     def test_failed_optional_refinement_keeps_original_shape(self):
         class RefinementFailure:
             def isNull(self):

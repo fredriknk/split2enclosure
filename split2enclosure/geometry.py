@@ -39,6 +39,18 @@ class ContourInfo:
     length: float
 
 
+@dataclass
+class SketchSplitResult:
+    """Two solids split by a ruled surface extruded from an open sketch."""
+
+    negative: Part.Shape
+    positive: Part.Shape
+    section: Part.Shape
+    surface: Part.Shape
+    sketch_wire: Part.Shape
+    extrusion_normal: App.Vector
+
+
 def _unit(vector):
     result = App.Vector(vector)
     if result.Length <= DEFAULT_TOLERANCE:
@@ -142,6 +154,120 @@ def _combine_faces(faces):
     for face in faces[1:]:
         result = result.fuse(face)
     return _safe_refine(result)
+
+
+def _open_sketch_wire(sketch_shape, tolerance=DEFAULT_TOLERANCE):
+    """Return the single connected open wire represented by a sketch shape."""
+
+    if sketch_shape is None or sketch_shape.isNull() or not sketch_shape.Edges:
+        raise ValueError("Select an open sketch containing at least one edge.")
+    tolerance = max(float(tolerance), DEFAULT_TOLERANCE)
+    wires = [wire for wire in sketch_shape.Wires if wire.Edges]
+    if len(wires) != 1 or len(wires[0].Edges) != len(sketch_shape.Edges):
+        raise ValueError("The split sketch must contain one connected edge chain.")
+    wire = wires[0].copy()
+    if wire.isClosed():
+        raise ValueError("The split sketch must be open, not a closed profile.")
+    if len(wire.Vertexes) < 2:
+        raise ValueError("The split sketch does not define a usable path.")
+    return wire
+
+
+def _surface_normal_at_face(face, point):
+    try:
+        u_value, v_value = face.Surface.parameter(point)
+    except (AttributeError, Part.OCCError, RuntimeError, ValueError):
+        u_min, u_max, v_min, v_max = face.ParameterRange
+        u_value = (u_min + u_max) * 0.5
+        v_value = (v_min + v_max) * 0.5
+    normal = face.normalAt(u_value, v_value)
+    normal.normalize()
+    return normal
+
+
+def _section_sample(section, surface, tolerance):
+    """Return a material point on the section and its oriented surface normal."""
+
+    for section_face in section.Faces:
+        point = section_face.CenterOfMass
+        vertex = Part.Vertex(point)
+        for surface_face in surface.Faces:
+            distance = surface_face.distToShape(vertex)[0]
+            if distance <= tolerance * 100:
+                return point, _surface_normal_at_face(surface_face, point)
+    raise RuntimeError("Could not orient the two sketch-split halves.")
+
+
+def split_with_sketch(
+    shape,
+    sketch_shape,
+    sketch_normal,
+    tolerance=DEFAULT_TOLERANCE,
+):
+    """Split ``shape`` with a surface made by extruding one open sketch chain.
+
+    ``sketch_normal`` is the normal of the sketch support plane and therefore
+    the extrusion direction. The wire must be connected and open, and the
+    resulting ruled surface must divide the source into exactly two solids.
+    Positive/negative are determined by the ruled surface's oriented normal.
+    """
+
+    if shape is None or shape.isNull() or not shape.Solids:
+        raise ValueError("Select a non-empty solid BRep shape.")
+    if not shape.isValid():
+        raise ValueError("The selected shape is not a valid BRep.")
+    tolerance = max(float(tolerance), DEFAULT_TOLERANCE)
+    extrusion_normal = _unit(sketch_normal)
+    sketch_wire = _open_sketch_wire(sketch_shape, tolerance)
+
+    span = max(shape.BoundBox.DiagonalLength * 2.0, 10.0)
+    surface_wire = sketch_wire.copy()
+    surface_wire.translate(-extrusion_normal * span)
+    surface = surface_wire.extrude(extrusion_normal * (span * 2.0))
+    if surface.isNull() or not surface.Faces or not surface.isValid():
+        raise ValueError("The selected sketch could not form a valid cutting surface.")
+
+    section = shape.common(surface)
+    if section.isNull() or not section.Faces:
+        raise ValueError("The extruded sketch surface does not cross the selected solid.")
+
+    sliced = SplitAPI.slice(shape, surface.Faces, "Split", tolerance)
+    solids = [solid.copy() for solid in sliced.Solids]
+    if len(solids) != 2:
+        raise ValueError(
+            "The sketch split must produce exactly two solids; it produced {}.".format(
+                len(solids)
+            )
+        )
+
+    sample, surface_normal = _section_sample(section, surface, tolerance)
+    epsilon = max(shape.BoundBox.DiagonalLength * 1e-5, tolerance * 100)
+    positive_point = sample + surface_normal * epsilon
+    negative_point = sample - surface_normal * epsilon
+    positive = next(
+        (solid for solid in solids if solid.isInside(positive_point, tolerance, True)),
+        None,
+    )
+    negative = next(
+        (solid for solid in solids if solid.isInside(negative_point, tolerance, True)),
+        None,
+    )
+    if positive is None or negative is None or positive.isSame(negative):
+        signed = [
+            ((solid.CenterOfMass - sample).dot(surface_normal), solid)
+            for solid in solids
+        ]
+        signed.sort(key=lambda item: item[0])
+        negative, positive = signed[0][1], signed[-1][1]
+
+    return SketchSplitResult(
+        negative=_safe_refine(negative),
+        positive=_safe_refine(positive),
+        section=section,
+        surface=surface,
+        sketch_wire=sketch_wire,
+        extrusion_normal=extrusion_normal,
+    )
 
 
 def _split_sides(shape, plane_face, origin, normal, tolerance):
