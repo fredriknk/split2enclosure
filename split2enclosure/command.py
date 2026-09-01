@@ -159,7 +159,13 @@ class EnclosureDialog(QtWidgets.QDialog):
         form.addRow("Side clearance", self.clearance)
         form.addRow("Depth clearance", self.vertical_clearance)
         form.addRow("Draft angle", self.draft_angle)
-        form.addRow("Snap bead radius", self.snap_radius)
+        self.snap_radius.setToolTip(
+            "Half the seam height; the lip width must exceed twice this value"
+        )
+        self.snap_clearance.setToolTip(
+            "Extra width and height in the receiving snap channel"
+        )
+        form.addRow("Snap seam half-size", self.snap_radius)
         form.addRow("Snap channel clearance", self.snap_clearance)
         form.addRow("Snap height fraction", self.snap_position)
 

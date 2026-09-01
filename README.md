@@ -54,7 +54,8 @@ Split2Enclosure takes a solid like this and:
 5. Choose the split plane and press **Preview / choose contours**.
 6. Click contours in the 3D view, or Shift/Ctrl-select list rows and use
    **NEG**, **OFF**, or **POS**, to choose the lip owner.
-7. Optionally select rows and press **SNAP** to add retention nubs and pockets.
+7. Optionally select rows and press **SNAP** to add continuous retention ribs
+   and matching channels around those perimeters.
 8. Set lip dimensions, clearances, and optional draft.
 9. Press **Create**.
 
@@ -69,11 +70,11 @@ The original solid is left untouched. Split2Enclosure creates two new
 | **Lip width** | Width of the tongue measured into the wall |
 | **Lip height** | Height of the tongue across the split |
 | **Side clearance** | Additional lateral clearance in the mating groove |
-| **Depth clearance** | Total axial clearance, shared between the lip root and groove tip |
+| **Depth clearance** | Extra axial room beyond the lip tip in the receiving groove |
 | **Draft angle** | Optional taper on the generated lip and groove limiting volumes |
-| **Snap radius** | Radius of each spherical retention nub |
-| **Snap clearance** | Radial clearance added to the matching snap pocket |
-| **Snap height fraction** | Nub position from lip root (`0.1` to `0.9`) |
+| **Snap seam half-size** | Half the rib height; the tongue is inset by twice this value |
+| **Snap channel clearance** | Extra width and height around the matching channel |
+| **Snap height fraction** | Rib position from lip root (`0.1` to `0.9`) |
 
 Blue contours/arrows are lips owned by the **negative** half, orange by the
 **positive** half, and gray contours are **off**. `[SNAP]` in a list row means
@@ -119,8 +120,8 @@ Plane normals and positive offset directions are:
 
 `Side clearance` is added only at the material-side mating face: the lip stays
 anchored to the selected perimeter and the groove extends farther into the
-wall. `Depth clearance` is split symmetrically between a root shoulder relief
-on the lip half and extra room beyond the lip tip on the receiving half.
+wall. `Depth clearance` adds room only beyond the lip tip in the receiving
+groove; it does not cut a shoulder recess around the lip root.
 
 ## Configurable defaults
 
@@ -140,11 +141,12 @@ user-selected contours and clips that band to the actual wall material.
 
 For an open-sketch split, the engine extrudes the sketch along its support-plane
 normal beyond the model bounds. OpenCASCADE partitions the body with the
-resulting ruled surface. Each planar surface panel receives its own local joint
-normal, while connected boundary edges are unfolded into sketch-path-distance
-coordinates for outer/internal contour classification. Lip material is then
-transferred face-by-face and the exact transferred shape is included in the
-groove cut to prevent overlap at angled mitres.
+resulting ruled surface. Connected boundary edges are unfolded into
+sketch-path-distance coordinates for outer/internal contour classification.
+The engine selects one signed global X, Y, or Z joint axis that crosses every
+ruled panel and uses it for the complete lip, groove, and preview arrows. This
+keeps polyline corners continuous instead of creating gaps between divergent
+panel-normal extrusions.
 
 The groove is cut with a widened/deepened band. The nominal lip prism is first
 intersected with the unmodified receiving half, and only that existing material
@@ -155,8 +157,10 @@ of being covered by a uniform extrusion.
 An optional draft angle lofts between the root footprint and a smaller tip
 footprint. On unusually complex clipped sketch panels where OpenCASCADE cannot
 construct that loft, only the affected panel falls back to a straight prism.
-Per-contour snap retention adds a spherical nub to the lip owner and cuts a
-larger concentric pocket from the mating half.
+Per-contour snap retention narrows the tongue, adds a full-width continuous rib
+around it at the requested height, and widens the receiving groove only through
+the corresponding channel. The resulting undercut follows the actual perimeter
+without placing dimples or holes in the enclosure wall.
 
 Full-circle contours use an exact analytic offset because OpenCASCADE's 2D
 offset builder can return a null result for a wire made from one circular edge.
@@ -177,17 +181,19 @@ derived directly from the final solid.
   B-splines are not yet supported.
 - A sketch split must divide the source into exactly two solids. Its endpoints
   should extend beyond the projected model boundary.
+- A sketch split must be monotonic across at least one global X, Y, or Z axis
+  so one consistent joint direction can cross every ruled panel.
 - Very thin walls, tight concave radii, or a lip wider than the available wall
   can make offsets fail. Reduce width/clearance or move the plane.
 - Results are static features. Change parameters by deleting the result group
   and running the command again.
-- Snap retention currently places one spherical nub at a deterministic point
-  on each enabled contour. Multiple nubs or drag-to-position are not yet
-  supported.
+- Snap retention creates one continuous rib/channel seam on each enabled
+  contour. Segmented snaps or multiple independently positioned ribs are not
+  yet supported.
 
 ## Completed TODOs in v0.4.0
 
-- [x] Split depth clearance between the lip root and groove tip.
+- [x] Apply depth clearance at the groove tip without recessing the lip root.
 - [x] Add optional draft angle to lip and groove.
 - [x] Harden sketch splits against missing panels and Boolean debris.
 - [x] Assign every profile independently to negative, positive, or off.
@@ -195,6 +201,13 @@ derived directly from the final solid.
 - [x] Visualize lip extrusion direction with colored arrows.
 - [x] Add configurable per-profile snap retention.
 - [x] Load user-editable defaults from the add-on directory.
+
+## v0.4.1 corrections
+
+- Sketch seams use one global extrusion axis instead of changing direction at
+  every polyline panel.
+- Lip-root clearance recesses were removed.
+- Point dimples were replaced by continuous perimeter snap ribs and channels.
 
 ## Tests and sample
 
