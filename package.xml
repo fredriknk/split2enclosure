@@ -3,7 +3,7 @@
     <name>Split2Enclosure</name>
     <description>Split solids with planes or open sketches and add matched lip-and-groove enclosure joints.</description>
     <icon>Resources/icons/split2enclosure.svg</icon>
-    <version>0.4.1</version>
+    <version>0.4.2</version>
     <date>2026-09-01</date>
     <maintainer>Split2Enclosure contributors</maintainer>
     <license file="LICENSE">MIT</license>

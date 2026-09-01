@@ -70,9 +70,9 @@ The original solid is left untouched. Split2Enclosure creates two new
 | **Lip width** | Width of the tongue measured into the wall |
 | **Lip height** | Height of the tongue across the split |
 | **Side clearance** | Additional lateral clearance in the mating groove |
-| **Depth clearance** | Extra axial room beyond the lip tip in the receiving groove |
+| **Depth clearance** | Axial gap beyond the lip tip and between opposing flat shoulders |
 | **Draft angle** | Optional taper on the generated lip and groove limiting volumes |
-| **Snap seam half-size** | Half the rib height; the tongue is inset by twice this value |
+| **Snap seam half-size** | Half the wedge height and its lateral reach (45-degree faces) |
 | **Snap channel clearance** | Extra width and height around the matching channel |
 | **Snap height fraction** | Rib position from lip root (`0.1` to `0.9`) |
 
@@ -120,8 +120,9 @@ Plane normals and positive offset directions are:
 
 `Side clearance` is added only at the material-side mating face: the lip stays
 anchored to the selected perimeter and the groove extends farther into the
-wall. `Depth clearance` adds room only beyond the lip tip in the receiving
-groove; it does not cut a shoulder recess around the lip root.
+wall. `Depth clearance` leaves the requested axial room both beyond the lip tip
+and across the non-lip shoulder surfaces. The lip-owning shoulder is relieved
+by that amount while the lip root remains attached at the original split.
 
 ## Configurable defaults
 
@@ -143,24 +144,30 @@ For an open-sketch split, the engine extrudes the sketch along its support-plane
 normal beyond the model bounds. OpenCASCADE partitions the body with the
 resulting ruled surface. Connected boundary edges are unfolded into
 sketch-path-distance coordinates for outer/internal contour classification.
-The engine selects one signed global X, Y, or Z joint axis that crosses every
-ruled panel and uses it for the complete lip, groove, and preview arrows. This
-keeps polyline corners continuous instead of creating gaps between divergent
-panel-normal extrusions.
+The engine fits one signed joint direction that crosses every ruled panel and
+uses it for the complete lip, groove, and preview arrows. A straight sketch
+uses its exact surface normal; a polyline uses the bisector of its limiting
+panel normals. This avoids the distortion caused by forcing a diagonal seam
+onto a global axis while still keeping polyline corners continuous. Coplanar
+section fragments created by OpenCASCADE are buffered as one region so their
+topological boundaries cannot introduce small breaks in the joint.
 
-The groove is cut with a widened/deepened band. The nominal lip prism is first
-intersected with the unmodified receiving half, and only that existing material
-is transferred to the lip half. Consequently, holes, slopes, curved walls, and
-features beginning immediately after the split plane remain in the lip instead
-of being covered by a uniform extrusion.
+The groove is cut with a widened/deepened band, and the lip-owning flat
+shoulder is set back by the same depth-clearance value. The nominal lip prism
+is first intersected with the unmodified receiving half, and only that existing
+material is transferred to the lip half. Consequently, holes, slopes, curved
+walls, and features beginning immediately after the split plane remain in the
+lip instead of being covered by a uniform extrusion.
 
 An optional draft angle lofts between the root footprint and a smaller tip
 footprint. On unusually complex clipped sketch panels where OpenCASCADE cannot
 construct that loft, only the affected panel falls back to a straight prism.
-Per-contour snap retention narrows the tongue, adds a full-width continuous rib
-around it at the requested height, and widens the receiving groove only through
-the corresponding channel. The resulting undercut follows the actual perimeter
-without placing dimples or holes in the enclosure wall.
+Per-contour snap retention narrows the tongue and lofts out to a continuous
+diamond/wedge seam at the requested height. Its outward face rises one unit for
+each unit of lateral reach, limiting the unsupported surface to 45 degrees. A
+similarly lofted channel adds the configured lateral and axial clearance. The
+resulting printable undercut follows the actual perimeter without placing
+dimples or holes in the enclosure wall.
 
 Full-circle contours use an exact analytic offset because OpenCASCADE's 2D
 offset builder can return a null result for a wire made from one circular edge.
@@ -181,15 +188,24 @@ derived directly from the final solid.
   B-splines are not yet supported.
 - A sketch split must divide the source into exactly two solids. Its endpoints
   should extend beyond the projected model boundary.
-- A sketch split must be monotonic across at least one global X, Y, or Z axis
-  so one consistent joint direction can cross every ruled panel.
+- A sketch split must admit one consistent direction through every ruled panel;
+  paths that reverse or fold back on themselves cannot form a continuous joint.
 - Very thin walls, tight concave radii, or a lip wider than the available wall
   can make offsets fail. Reduce width/clearance or move the plane.
 - Results are static features. Change parameters by deleting the result group
   and running the command again.
-- Snap retention creates one continuous rib/channel seam on each enabled
-  contour. Segmented snaps or multiple independently positioned ribs are not
-  yet supported.
+- Snap retention creates one continuous 45-degree wedge/channel seam on each
+  enabled contour. Segmented snaps or multiple independently positioned ribs
+  are not yet supported.
+
+## v0.4.2 corrections
+
+- Snap seams use printable 45-degree wedge faces with clearance-matched channels.
+- Depth clearance now applies equally at the lip tip and flat mating shoulders.
+- Sketch joints use a fitted common direction, including the exact normal for
+  straight diagonal sketches, and merge coplanar section fragments before
+  offsetting.
+- `examples/Splitbox_test.FCStd` is covered by the geometry regression suite.
 
 ## v0.4.1 corrections
 

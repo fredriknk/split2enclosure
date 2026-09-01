@@ -1,5 +1,6 @@
 import os
 import json
+import math
 import sys
 import tempfile
 import unittest
@@ -176,7 +177,7 @@ class GeometryTests(unittest.TestCase):
         self.assertEqual(len(result.internal_wires), 2)
         self.assert_valid_pair(source, result)
 
-    def test_depth_clearance_only_deepens_receiving_groove(self):
+    def test_depth_clearance_gaps_lip_tip_and_flat_shoulders(self):
         source = hollow_box(open_top=False)
         origin, normal = plane_from_axes("XY", 10)
         without_clearance = make_enclosure(
@@ -200,20 +201,21 @@ class GeometryTests(unittest.TestCase):
             contour_mode="outer",
         )
         self.assertTrue(without_clearance.root_clearance.isNull())
-        self.assertTrue(deepened.root_clearance.isNull())
+        self.assertGreater(deepened.root_clearance.Volume, 0.0)
         self.assertAlmostEqual(
             without_clearance.lip.Volume,
             deepened.lip.Volume,
             places=6,
         )
-        self.assertAlmostEqual(
-            deepened.negative.Volume,
-            without_clearance.negative.Volume,
-            places=6,
-        )
+        self.assertLess(deepened.negative.Volume, without_clearance.negative.Volume)
         self.assertLess(deepened.positive.Volume, without_clearance.positive.Volume)
+        shoulder_point = App.Vector(1.2, 15.0, 9.8)
+        self.assertTrue(
+            without_clearance.negative.isInside(shoulder_point, 1e-6, True)
+        )
+        self.assertFalse(deepened.negative.isInside(shoulder_point, 1e-6, True))
 
-    def test_sketch_lips_use_one_global_axis(self):
+    def test_sketch_lips_use_one_fitted_direction(self):
         source = hollow_box(open_top=False)
         path = Part.makePolygon(
             [
@@ -232,9 +234,9 @@ class GeometryTests(unittest.TestCase):
         ]
         self.assertTrue(directions)
         self.assertTrue(all(direction == directions[0] for direction in directions))
-        self.assertEqual(
-            sum(abs(component) > 1e-9 for component in directions[0]),
-            1,
+        self.assertAlmostEqual(directions[0].Length, 1.0, places=9)
+        self.assertGreater(
+            sum(abs(component) > 1e-9 for component in directions[0]), 1
         )
         result = make_enclosure_with_sketch(
             source,
@@ -247,6 +249,45 @@ class GeometryTests(unittest.TestCase):
             contour_mode="outer",
         )
         self.assert_valid_pair(source, result)
+
+    def test_splitbox_complex_diagonal_sketch_uses_continuous_matched_joint(self):
+        path = os.path.join(PROJECT_ROOT, "examples", "Splitbox_test.FCStd")
+        document = App.openDocument(path)
+        try:
+            source = document.getObject("Body").Shape
+            sketch = document.getObject("Sketch005").Shape
+            split, contours = analyze_sketch_contours(
+                source, sketch, App.Vector(0, 0, 1)
+            )
+            self.assertGreaterEqual(len(contours), 5)
+            direction = ruled_contour_positive_direction(split, contours[0].wire)
+            surface_face = split.surface.Faces[0]
+            u_min, u_max, v_min, v_max = surface_face.ParameterRange
+            surface_normal = surface_face.normalAt(
+                (u_min + u_max) * 0.5,
+                (v_min + v_max) * 0.5,
+            )
+            surface_normal.normalize()
+            self.assertGreater(abs(direction.dot(surface_normal)), 0.999999)
+            self.assertGreater(abs(direction.x), 0.1)
+            self.assertGreater(abs(direction.y), 0.9)
+
+            result = make_enclosure_with_sketch(
+                source,
+                sketch,
+                App.Vector(0, 0, 1),
+                lip_width=1.0,
+                lip_height=2.0,
+                clearance=0.2,
+                vertical_clearance=0.2,
+                contour_sides={0: "negative"},
+            )
+            self.assert_valid_pair(source, result)
+            self.assertEqual(len(result.lip.Solids), 1)
+            self.assertEqual(len(result.groove.Solids), 1)
+            self.assertLess(result.lip.cut(result.groove).Volume, 1e-6)
+        finally:
+            App.closeDocument(document.Name)
 
     def test_optional_draft_tapers_plane_lip_and_groove(self):
         source = hollow_box(open_top=False)
@@ -308,7 +349,7 @@ class GeometryTests(unittest.TestCase):
         self.assertEqual(result.contour_sides[1], "positive")
         self.assertGreater(result.lip.Volume, 0.0)
 
-    def test_per_contour_snap_bead_has_matching_clearance_channel(self):
+    def test_per_contour_snap_wedge_has_matching_clearance_channel(self):
         source = hollow_box(open_top=False)
         origin, normal = plane_from_axes("XY", 10)
         result = make_enclosure(
@@ -329,6 +370,22 @@ class GeometryTests(unittest.TestCase):
         self.assertGreater(result.snap_features.Volume, 0.0)
         self.assertGreater(result.snap_features.BoundBox.XLength, 20.0)
         self.assertGreater(result.snap_features.BoundBox.YLength, 15.0)
+        maximum_axial_normal = 0.0
+        for face in result.snap_features.Faces:
+            u_min, u_max, v_min, v_max = face.ParameterRange
+            face_normal = face.normalAt(
+                (u_min + u_max) * 0.5,
+                (v_min + v_max) * 0.5,
+            )
+            face_normal.normalize()
+            maximum_axial_normal = max(
+                maximum_axial_normal, abs(face_normal.dot(normal))
+            )
+        self.assertLessEqual(
+            maximum_axial_normal,
+            math.cos(math.radians(45.0)) + 1e-6,
+            "Snap seam faces must not exceed a 45-degree printable overhang",
+        )
         self.assertTrue(result.negative.isValid())
         self.assertTrue(result.positive.isValid())
         try:
@@ -338,7 +395,7 @@ class GeometryTests(unittest.TestCase):
             overlap_volume = 0.0
         self.assertLess(overlap_volume, 1e-6)
 
-    def test_snap_bead_works_on_sketch_seam(self):
+    def test_snap_wedge_works_on_sketch_seam(self):
         outer = Part.makeBox(40, 30, 20, App.Vector(-20, -15, -10))
         inner = Part.makeBox(36, 26, 16, App.Vector(-18, -13, -8))
         source = outer.cut(inner)

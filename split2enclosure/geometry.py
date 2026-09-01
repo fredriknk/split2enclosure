@@ -590,13 +590,48 @@ def _planar_face_basis(face):
     return point, axis_u, axis_v
 
 
-def _edge_band_on_face(face, edges, distance, tolerance):
+def _coplanar_face_groups(faces, tolerance):
+    """Group section patches that share one geometric support plane."""
+
+    groups = []
+    plane_data = []
+    distance_tolerance = max(float(tolerance), DEFAULT_TOLERANCE) * 100
+    for face in faces:
+        if not isinstance(face.Surface, Part.Plane):
+            raise ValueError("Sketch-seam joint panels must be planar.")
+        u_min, u_max, v_min, v_max = face.ParameterRange
+        point = face.valueAt((u_min + u_max) * 0.5, (v_min + v_max) * 0.5)
+        normal = face.normalAt((u_min + u_max) * 0.5, (v_min + v_max) * 0.5)
+        normal.normalize()
+        for index, (plane_point, plane_normal) in enumerate(plane_data):
+            if (
+                abs(abs(normal.dot(plane_normal)) - 1.0) <= 1e-7
+                and abs((point - plane_point).dot(plane_normal)) <= distance_tolerance
+            ):
+                groups[index].append(face)
+                break
+        else:
+            groups.append([face])
+            plane_data.append((point, normal))
+    return groups
+
+
+def _edge_band_on_faces(section_faces, edges, distance, tolerance):
+    """Buffer boundary edges once across all coplanar section patches.
+
+    OCC commonly splits a complex section into adjacent faces even though they
+    lie on exactly the same plane. Buffering and clipping each patch in
+    isolation leaves tiny seams where those artificial face boundaries meet.
+    Treating the coplanar collection as one material region keeps the joint
+    continuous across those topology-only divisions.
+    """
+
     from shapely.geometry import LineString
     from shapely.ops import unary_union
 
-    if not edges:
+    if not section_faces or not edges:
         return Part.Shape()
-    origin, axis_u, axis_v = _planar_face_basis(face)
+    origin, axis_u, axis_v = _planar_face_basis(section_faces[0])
     lines = []
     for edge in edges:
         coordinates = []
@@ -617,7 +652,7 @@ def _edge_band_on_face(face, edges, distance, tolerance):
         mitre_limit=5.0,
     )
     polygons = [buffered] if buffered.geom_type == "Polygon" else list(buffered.geoms)
-    faces = []
+    band_faces = []
     for polygon in polygons:
         if polygon.geom_type != "Polygon":
             continue
@@ -625,10 +660,11 @@ def _edge_band_on_face(face, edges, distance, tolerance):
             polygon, origin, axis_u, axis_v, tolerance
         )
         if not converted.isNull() and converted.Faces:
-            faces.extend(converted.Faces)
-    if not faces:
+            band_faces.extend(converted.Faces)
+    if not band_faces:
         return Part.Shape()
-    return _combine_faces(faces).common(face)
+    section_material = _combine_faces(section_faces)
+    return _combine_faces(band_faces).common(section_material)
 
 
 def _matching_surface_face(section_face, surface, tolerance):
@@ -656,12 +692,14 @@ def ruled_contour_positive_direction(
     wire,
     tolerance=DEFAULT_TOLERANCE,
 ):
-    """Return one signed global axis that crosses the whole ruled surface.
+    """Return one signed direction that crosses the whole ruled surface.
 
     A sketch seam used to extrude every ruled panel along its own normal. At a
     polyline corner those directions diverge, producing mitre wedges and gaps.
-    A usable arbitrary split path must instead be monotonic across one global
-    X/Y/Z axis; every panel and preview arrow then uses that same axis.
+    The joint instead uses the direction that maximizes its least-direct
+    crossing of all panels. A straight or coplanar seam therefore follows its
+    exact surface normal, while a polyline uses the bisector of its limiting
+    panel normals. Every panel and preview arrow shares that direction.
     """
 
     del wire  # Kept in the public signature for backwards compatibility.
@@ -682,27 +720,28 @@ def ruled_contour_positive_direction(
             normal = -normal
         positive_normals.append(normal)
 
-    candidates = []
     center_delta = split.positive.CenterOfMass - split.negative.CenterOfMass
-    for axis in (
-        App.Vector(1, 0, 0),
-        App.Vector(0, 1, 0),
-        App.Vector(0, 0, 1),
-    ):
-        dots = [normal.dot(axis) for normal in positive_normals]
-        if not dots or min(abs(value) for value in dots) <= 1e-4:
+    raw_candidates = list(positive_normals)
+    normal_sum = App.Vector()
+    for normal in positive_normals:
+        normal_sum += normal
+    raw_candidates.append(normal_sum)
+    raw_candidates.append(center_delta)
+    for first_index, first in enumerate(positive_normals):
+        for second in positive_normals[first_index + 1:]:
+            raw_candidates.append(first + second)
+
+    candidates = []
+    for raw_candidate in raw_candidates:
+        if raw_candidate.Length <= tolerance:
             continue
-        if min(dots) < 0.0 < max(dots):
-            continue
-        directed = axis if sum(dots) > 0.0 else -axis
-        # Prefer the axis that crosses the least-favourable panel most
-        # directly. The centroid term only resolves near-ties.
-        score = min(abs(value) for value in dots) + abs(center_delta.dot(axis)) * 1e-9
-        candidates.append((score, directed))
-    if not candidates:
+        candidate = _unit(raw_candidate)
+        score = min(normal.dot(candidate) for normal in positive_normals)
+        candidates.append((score, candidate))
+    if not candidates or max(candidates, key=lambda item: item[0])[0] <= 1e-4:
         raise ValueError(
-            "The sketch seam cannot use one global extrusion axis. Make the "
-            "split path monotonic across global X, Y, or Z."
+            "The sketch seam cannot use one consistent extrusion direction. "
+            "Remove any reversal or overhang in the split path."
         )
     return max(candidates, key=lambda item: item[0])[1]
 
@@ -780,20 +819,71 @@ def _normalized_snap_assignments(contours, contour_snaps):
     }
 
 
-def _joint_slice(section, shape, direction, start, height):
-    """Extract an axial band from a globally extruded joint shape."""
+def _joint_section(section, shape, direction, position):
+    """Return the actual joint cross-section at one axial position."""
 
     surface = section.copy()
-    surface.translate(_unit(direction) * start)
-    footprint = shape.common(surface)
-    if footprint.isNull() or not footprint.Faces:
-        return Part.Shape()
-    return _extrude_faces(footprint, _unit(direction) * height).common(shape)
+    surface.translate(_unit(direction) * position)
+    return shape.common(surface)
+
+
+def _loft_joint_sections(bottom, top, direction, distance, tolerance):
+    """Loft matching section faces with straight, printable side walls."""
+
+    if bottom.isNull() or top.isNull() or not bottom.Faces or not top.Faces:
+        raise ValueError("A snap transition has an empty cross-section.")
+    if len(bottom.Faces) != len(top.Faces):
+        raise ValueError(
+            "A snap transition changes topology. Reduce the snap size or move it."
+        )
+
+    available_top_faces = list(top.Faces)
+    solids = []
+    expected_offset = _unit(direction) * distance
+    for bottom_face in bottom.Faces:
+        expected_center = bottom_face.CenterOfMass + expected_offset
+        top_face = _nearest_shape(expected_center, available_top_faces)
+        available_top_faces.remove(top_face)
+        try:
+            solid = Part.makeLoft(
+                [bottom_face.OuterWire, top_face.OuterWire],
+                True,
+                True,
+            )
+            bottom_holes = _inner_wires(bottom_face)
+            top_holes = _inner_wires(top_face)
+            if len(bottom_holes) != len(top_holes):
+                raise ValueError("A snap transition changes its hole topology.")
+            available_top_holes = list(top_holes)
+            for bottom_hole in bottom_holes:
+                expected_hole_center = bottom_hole.CenterOfMass + expected_offset
+                top_hole = _nearest_shape(expected_hole_center, available_top_holes)
+                available_top_holes.remove(top_hole)
+                hole = Part.makeLoft([bottom_hole, top_hole], True, True)
+                solid = solid.cut(hole)
+        except (Part.OCCError, RuntimeError, ValueError) as exc:
+            raise ValueError(
+                "Could not construct a printable snap transition: {}".format(exc)
+            ) from exc
+        if not solid.isNull() and solid.Solids:
+            solids.extend(solid.Solids)
+    if not solids:
+        raise ValueError("Could not construct a printable snap transition.")
+    result = _fuse_shapes(solids)
+    if (
+        result.isNull()
+        or not result.Solids
+        or result.Volume <= max(tolerance ** 3 * 1000, 1e-9)
+        or not result.isValid()
+    ):
+        raise ValueError("The printable snap transition is not a valid solid.")
+    return result
 
 
 def _snap_for_contour(
     section,
     stem_lip,
+    stem_groove,
     wide_lip,
     wide_groove,
     extrusion_direction,
@@ -805,33 +895,60 @@ def _snap_for_contour(
 ):
     direction = _unit(extrusion_direction)
     available_height = lip_height * min(snap_position, 1.0 - snap_position)
-    if snap_radius >= available_height - tolerance:
+    channel_extent = snap_radius + snap_clearance
+    if channel_extent >= available_height - tolerance:
         raise ValueError(
-            "Snap radius is too large for its height on the lip. Reduce the "
-            "radius or move the snap height fraction toward 0.5."
+            "Snap size plus channel clearance is too large for its height on "
+            "the lip. Reduce it or move the snap height fraction toward 0.5."
         )
 
     center = lip_height * snap_position
     start = center - snap_radius
-    height = snap_radius * 2.0
-    rib = _joint_slice(section, wide_lip, direction, start, height)
+    end = center + snap_radius
+    stem_start = _joint_section(section, stem_lip, direction, start)
+    wide_center = _joint_section(section, wide_lip, direction, center)
+    stem_end = _joint_section(section, stem_lip, direction, end)
+    lower_rib = _loft_joint_sections(
+        stem_start, wide_center, direction, snap_radius, tolerance
+    )
+    upper_rib = _loft_joint_sections(
+        wide_center, stem_end, direction, snap_radius, tolerance
+    )
+    rib = _fuse_shapes([lower_rib, upper_rib])
     if rib.isNull() or not rib.Solids:
-        raise ValueError("Could not construct a continuous snap seam on the lip.")
+        raise ValueError("Could not construct a printable snap seam on the lip.")
     added = rib.cut(stem_lip)
     if added.isNull() or added.Volume <= max(tolerance ** 3 * 1000, 1e-9):
         raise ValueError(
             "No continuous snap seam fits this lip perimeter. Reduce snap size."
         )
 
-    channel_start = max(0.0, start - snap_clearance)
-    channel_end = min(lip_height, start + height + snap_clearance)
-    channel = _joint_slice(
-        section,
-        wide_groove,
-        direction,
-        channel_start,
-        channel_end - channel_start,
+    channel_start = center - channel_extent
+    channel_end = center + channel_extent
+    narrow_channel_start = _joint_section(
+        section, stem_groove, direction, channel_start
     )
+    wide_channel_center = _joint_section(
+        section, wide_groove, direction, center
+    )
+    narrow_channel_end = _joint_section(
+        section, stem_groove, direction, channel_end
+    )
+    lower_channel = _loft_joint_sections(
+        narrow_channel_start,
+        wide_channel_center,
+        direction,
+        channel_extent,
+        tolerance,
+    )
+    upper_channel = _loft_joint_sections(
+        wide_channel_center,
+        narrow_channel_end,
+        direction,
+        channel_extent,
+        tolerance,
+    )
+    channel = _fuse_shapes([lower_channel, upper_channel])
     if channel.isNull() or not channel.Solids:
         raise ValueError("Could not construct the matching snap channel.")
     return rib, channel, added
@@ -853,14 +970,16 @@ def _ruled_joint_volumes(
     receiver = split.positive if lip_on == "negative" else split.negative
     lip_parts = []
     groove_parts = []
+    root_parts = []
     direction = (
         _unit(positive_direction)
         if lip_on == "negative"
         else -_unit(positive_direction)
     )
-    for section_face in split.section.Faces:
+    for section_faces in _coplanar_face_groups(split.section.Faces, tolerance):
         boundary_edges = [
             edge
+            for section_face in section_faces
             for edge in section_face.Edges
             if any(
                 edge.isSame(selected)
@@ -870,11 +989,11 @@ def _ruled_joint_volumes(
         ]
         if not boundary_edges:
             continue
-        lip_band = _edge_band_on_face(
-            section_face, boundary_edges, lip_width, tolerance
+        lip_band = _edge_band_on_faces(
+            section_faces, boundary_edges, lip_width, tolerance
         )
-        groove_band = _edge_band_on_face(
-            section_face, boundary_edges, lip_width + clearance, tolerance
+        groove_band = _edge_band_on_faces(
+            section_faces, boundary_edges, lip_width + clearance, tolerance
         )
         if lip_band.isNull() or not lip_band.Faces:
             continue
@@ -886,11 +1005,11 @@ def _ruled_joint_volumes(
             raise ValueError(
                 "Draft angle is too large for the requested lip width and height."
             )
-        top_lip_band = _edge_band_on_face(
-            section_face, boundary_edges, top_lip_width, tolerance
+        top_lip_band = _edge_band_on_faces(
+            section_faces, boundary_edges, top_lip_width, tolerance
         )
-        top_groove_band = _edge_band_on_face(
-            section_face, boundary_edges, top_groove_width, tolerance
+        top_groove_band = _edge_band_on_faces(
+            section_faces, boundary_edges, top_groove_width, tolerance
         )
         lip_piece = _drafted_extrusion(
             lip_band,
@@ -907,6 +1026,17 @@ def _ruled_joint_volumes(
             draft_angle,
         )
         groove_piece.translate(-direction * tolerance)
+        if vertical_clearance > tolerance:
+            section_material = _combine_faces(section_faces)
+            root_band = section_material.cut(lip_band)
+            if not root_band.isNull() and root_band.Faces:
+                root_piece = _extrude_faces(
+                    root_band,
+                    -direction * (vertical_clearance + tolerance),
+                )
+                root_piece.translate(direction * tolerance)
+                if not root_piece.isNull():
+                    root_parts.extend(root_piece.Solids)
         if not lip_piece.isNull():
             lip_parts.extend(lip_piece.Solids)
         if not groove_piece.isNull():
@@ -920,7 +1050,7 @@ def _ruled_joint_volumes(
     if lip.isNull() or not lip.Solids:
         raise ValueError("The receiving half contains no material for the sketch-seam lip.")
     groove = raw_groove
-    return lip, groove, Part.Shape()
+    return lip, groove, _combine(root_parts)
 
 
 def make_enclosure_with_sketch(
@@ -937,8 +1067,8 @@ def make_enclosure_with_sketch(
     contour_indices=None,
     contour_sides=None,
     contour_snaps=None,
-    snap_radius=0.6,
-    snap_clearance=0.15,
+    snap_radius=0.2,
+    snap_clearance=0.05,
     snap_position=0.7,
     tolerance=DEFAULT_TOLERANCE,
 ):
@@ -975,8 +1105,8 @@ def make_enclosure_with_sketch(
         contours, contour_sides, contour_indices, lip_on, contour_mode
     )
     snap_assignments = _normalized_snap_assignments(contours, contour_snaps)
-    if any(snap_assignments.values()) and lip_width - 2.0 * snap_radius <= tolerance:
-        raise ValueError("Snap bead diameter must be smaller than the lip width.")
+    if any(snap_assignments.values()) and lip_width - snap_radius <= tolerance:
+        raise ValueError("Snap seam half-size must be smaller than the lip width.")
     joint_positive_direction = ruled_contour_positive_direction(
         split, contours[0].wire, tolerance
     )
@@ -984,7 +1114,7 @@ def make_enclosure_with_sketch(
     positive = split.positive
     lips = []
     grooves = []
-    root_clearances = []
+    root_clearance_groups = {"negative": [], "positive": []}
     for side in ("negative", "positive"):
         for snapped in (False, True):
             wires = [
@@ -995,7 +1125,7 @@ def make_enclosure_with_sketch(
             ]
             if not wires:
                 continue
-            effective_width = lip_width - 2.0 * snap_radius if snapped else lip_width
+            effective_width = lip_width - snap_radius if snapped else lip_width
             lip, groove, root_clearance = _ruled_joint_volumes(
                 split,
                 wires,
@@ -1011,7 +1141,7 @@ def make_enclosure_with_sketch(
             lips.append(lip)
             grooves.append(groove)
             if root_clearance is not None and not root_clearance.isNull():
-                root_clearances.append(root_clearance)
+                root_clearance_groups[side].append(root_clearance)
             if side == "negative":
                 negative = _safe_refine(negative.fuse(lip))
                 positive = _cut_tool_solids(positive, groove)
@@ -1021,15 +1151,30 @@ def make_enclosure_with_sketch(
                 negative = _cut_tool_solids(negative, groove)
                 negative = _safe_refine(negative.cut(lip))
 
+    root_clearances = []
+    for side, tools in root_clearance_groups.items():
+        if not tools:
+            continue
+        root_clearance = tools[0]
+        for tool in tools[1:]:
+            root_clearance = root_clearance.common(tool)
+        if root_clearance.isNull() or not root_clearance.Solids:
+            continue
+        root_clearances.append(root_clearance)
+        if side == "negative":
+            negative = _cut_tool_solids(negative, root_clearance)
+        else:
+            positive = _cut_tool_solids(positive, root_clearance)
+
     snap_features = []
     for contour in contours:
         side = assignments[contour.index]
         if side == "none" or not snap_assignments[contour.index]:
             continue
-        contour_lip, _unused_groove, _unused_root = _ruled_joint_volumes(
+        contour_lip, contour_groove, _unused_root = _ruled_joint_volumes(
             split,
             [contour.wire],
-            lip_width - 2.0 * snap_radius,
+            lip_width - snap_radius,
             lip_height,
             clearance,
             vertical_clearance,
@@ -1070,6 +1215,7 @@ def make_enclosure_with_sketch(
         bump, pocket, added = _snap_for_contour(
             split.section,
             contour_lip,
+            contour_groove,
             wide_lip,
             wide_groove,
             extrusion_direction,
@@ -1544,7 +1690,18 @@ def _plane_joint_volumes(
         draft_angle,
     )
     groove.translate(-direction * tolerance)
-    return lip, groove, Part.Shape()
+
+    root_clearance = Part.Shape()
+    if vertical_clearance > tolerance:
+        section_material = _combine_faces(section.Faces)
+        root_band = section_material.cut(lip_footprint)
+        if not root_band.isNull() and root_band.Faces:
+            root_clearance = _extrude_faces(
+                root_band,
+                -direction * (vertical_clearance + tolerance),
+            )
+            root_clearance.translate(direction * tolerance)
+    return lip, groove, root_clearance
 
 
 def make_enclosure(
@@ -1561,8 +1718,8 @@ def make_enclosure(
     contour_indices=None,
     contour_sides=None,
     contour_snaps=None,
-    snap_radius=0.6,
-    snap_clearance=0.15,
+    snap_radius=0.2,
+    snap_clearance=0.05,
     snap_position=0.7,
     tolerance=DEFAULT_TOLERANCE,
 ):
@@ -1577,8 +1734,9 @@ def make_enclosure(
     ``contour_mode="internal"``, the lip follows every nested closed
     contour in the section. With ``contour_mode="outer"``, it follows each
     disconnected section region's outermost perimeter and ignores holes. The
-    groove is wider on the material side by ``clearance`` and deeper by
-    ``vertical_clearance``. The lip volume is intersected with ("stolen"
+    groove is wider on the material side by ``clearance``. The same
+    ``vertical_clearance`` is left both beyond the lip tip and between the
+    opposing shoulder faces. The lip volume is intersected with ("stolen"
     from) the receiving half so existing holes, slopes, and local details are
     retained instead of being covered by a uniform prism.
     """
@@ -1620,8 +1778,8 @@ def make_enclosure(
         contours, contour_sides, contour_indices, lip_on, contour_mode
     )
     snap_assignments = _normalized_snap_assignments(contours, contour_snaps)
-    if any(snap_assignments.values()) and lip_width - 2.0 * snap_radius <= tolerance:
-        raise ValueError("Snap bead diameter must be smaller than the lip width.")
+    if any(snap_assignments.values()) and lip_width - snap_radius <= tolerance:
+        raise ValueError("Snap seam half-size must be smaller than the lip width.")
 
     negative, positive = _split_sides(
         shape, plane_face, origin, normal, tolerance
@@ -1630,7 +1788,7 @@ def make_enclosure(
     base_positive = positive
     lips = []
     grooves = []
-    root_clearances = []
+    root_clearance_groups = {"negative": [], "positive": []}
     for side in ("negative", "positive"):
         for snapped in (False, True):
             wires = [
@@ -1641,7 +1799,7 @@ def make_enclosure(
             ]
             if not wires:
                 continue
-            effective_width = lip_width - 2.0 * snap_radius if snapped else lip_width
+            effective_width = lip_width - snap_radius if snapped else lip_width
             lip, groove, root_clearance = _plane_joint_volumes(
                 section,
                 wires,
@@ -1659,7 +1817,7 @@ def make_enclosure(
             lips.append(lip)
             grooves.append(groove)
             if not root_clearance.isNull():
-                root_clearances.append(root_clearance)
+                root_clearance_groups[side].append(root_clearance)
             if side == "negative":
                 negative = _safe_refine(negative.fuse(lip))
                 positive = _cut_tool_solids(positive, groove)
@@ -1669,18 +1827,33 @@ def make_enclosure(
                 negative = _cut_tool_solids(negative, groove)
                 negative = _safe_refine(negative.cut(lip))
 
+    root_clearances = []
+    for side, tools in root_clearance_groups.items():
+        if not tools:
+            continue
+        root_clearance = tools[0]
+        for tool in tools[1:]:
+            root_clearance = root_clearance.common(tool)
+        if root_clearance.isNull() or not root_clearance.Solids:
+            continue
+        root_clearances.append(root_clearance)
+        if side == "negative":
+            negative = _cut_tool_solids(negative, root_clearance)
+        else:
+            positive = _cut_tool_solids(positive, root_clearance)
+
     snap_features = []
     for contour in contours:
         side = assignments[contour.index]
         if side == "none" or not snap_assignments[contour.index]:
             continue
-        contour_lip, _unused_groove, _unused_root = _plane_joint_volumes(
+        contour_lip, contour_groove, _unused_root = _plane_joint_volumes(
             section,
             [contour.wire],
             base_negative,
             base_positive,
             normal,
-            lip_width - 2.0 * snap_radius,
+            lip_width - snap_radius,
             lip_height,
             clearance,
             vertical_clearance,
@@ -1720,6 +1893,7 @@ def make_enclosure(
         bump, pocket, added = _snap_for_contour(
             section,
             contour_lip,
+            contour_groove,
             wide_lip,
             wide_groove,
             extrusion_direction,

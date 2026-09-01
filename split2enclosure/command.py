@@ -160,10 +160,13 @@ class EnclosureDialog(QtWidgets.QDialog):
         form.addRow("Depth clearance", self.vertical_clearance)
         form.addRow("Draft angle", self.draft_angle)
         self.snap_radius.setToolTip(
-            "Half the seam height; the lip width must exceed twice this value"
+            "Half the wedge height and its lateral reach; produces 45-degree faces"
         )
         self.snap_clearance.setToolTip(
             "Extra width and height in the receiving snap channel"
+        )
+        self.vertical_clearance.setToolTip(
+            "Axial gap beyond the lip tip and between opposing flat shoulders"
         )
         form.addRow("Snap seam half-size", self.snap_radius)
         form.addRow("Snap channel clearance", self.snap_clearance)
@@ -208,8 +211,9 @@ class EnclosureDialog(QtWidgets.QDialog):
 
         note = QtWidgets.QLabel(
             "Side clearance widens only the groove's material-side mating face; "
-            "it does not move the lip away from the chosen perimeter. The lip "
-            "is taken from the receiving half so holes and local details remain."
+            "it does not move the lip away from the chosen perimeter. Depth "
+            "clearance gaps both the lip tip and the flat shoulders. The lip is "
+            "taken from the receiving half so holes and local details remain."
         )
         note.setWordWrap(True)
         layout.addWidget(note)
