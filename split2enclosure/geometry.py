@@ -639,28 +639,55 @@ def ruled_contour_positive_direction(
     wire,
     tolerance=DEFAULT_TOLERANCE,
 ):
-    """Return the local ruled-surface direction toward the positive half."""
+    """Return one signed global axis that crosses the whole ruled surface.
 
+    A sketch seam used to extrude every ruled panel along its own normal. At a
+    polyline corner those directions diverge, producing mitre wedges and gaps.
+    A usable arbitrary split path must instead be monotonic across one global
+    X/Y/Z axis; every panel and preview arrow then uses that same axis.
+    """
+
+    del wire  # Kept in the public signature for backwards compatibility.
     tolerance = max(float(tolerance), DEFAULT_TOLERANCE)
+    positive_normals = []
+    epsilon = max(split.section.BoundBox.DiagonalLength * 1e-6, tolerance * 10)
     for section_face in split.section.Faces:
-        if not any(
-            _same_geometric_edge(face_edge, wire_edge, tolerance)
-            for face_edge in section_face.Edges
-            for wire_edge in wire.Edges
-        ):
-            continue
         surface_face = _matching_surface_face(section_face, split.surface, tolerance)
         point = section_face.CenterOfMass
         normal = _surface_normal_at_face(surface_face, point)
-        epsilon = max(split.section.BoundBox.DiagonalLength * 1e-6, tolerance * 10)
         if split.positive.isInside(point + normal * epsilon, tolerance, True):
-            return normal
+            positive_normals.append(normal)
+            continue
         if split.positive.isInside(point - normal * epsilon, tolerance, True):
-            return -normal
-        if (split.positive.CenterOfMass - point).dot(normal) < 0:
+            positive_normals.append(-normal)
+            continue
+        if (split.positive.CenterOfMass - point).dot(normal) < 0.0:
             normal = -normal
-        return normal
-    raise ValueError("Could not determine the local direction for this contour.")
+        positive_normals.append(normal)
+
+    candidates = []
+    center_delta = split.positive.CenterOfMass - split.negative.CenterOfMass
+    for axis in (
+        App.Vector(1, 0, 0),
+        App.Vector(0, 1, 0),
+        App.Vector(0, 0, 1),
+    ):
+        dots = [normal.dot(axis) for normal in positive_normals]
+        if not dots or min(abs(value) for value in dots) <= 1e-4:
+            continue
+        if min(dots) < 0.0 < max(dots):
+            continue
+        directed = axis if sum(dots) > 0.0 else -axis
+        # Prefer the axis that crosses the least-favourable panel most
+        # directly. The centroid term only resolves near-ties.
+        score = min(abs(value) for value in dots) + abs(center_delta.dot(axis)) * 1e-9
+        candidates.append((score, directed))
+    if not candidates:
+        raise ValueError(
+            "The sketch seam cannot use one global extrusion axis. Make the "
+            "split path monotonic across global X, Y, or Z."
+        )
+    return max(candidates, key=lambda item: item[0])[1]
 
 
 def _contour_groups(
@@ -806,14 +833,18 @@ def _ruled_joint_volumes(
     vertical_clearance,
     draft_angle,
     lip_on,
+    positive_direction,
     tolerance,
 ):
     selected_edges = [edge for wire in selected_wires for edge in wire.Edges]
     receiver = split.positive if lip_on == "negative" else split.negative
     lip_parts = []
     groove_parts = []
-    root_parts = []
-    epsilon = max(split.section.BoundBox.DiagonalLength * 1e-6, tolerance * 10)
+    direction = (
+        _unit(positive_direction)
+        if lip_on == "negative"
+        else -_unit(positive_direction)
+    )
     for section_face in split.section.Faces:
         boundary_edges = [
             edge
@@ -835,7 +866,7 @@ def _ruled_joint_volumes(
         if lip_band.isNull() or not lip_band.Faces:
             continue
         draft_slope = math.tan(math.radians(draft_angle))
-        groove_depth = lip_height + vertical_clearance * 0.5
+        groove_depth = lip_height + vertical_clearance
         top_lip_width = lip_width - draft_slope * lip_height
         top_groove_width = lip_width + clearance - draft_slope * groove_depth
         if top_lip_width <= tolerance or top_groove_width <= tolerance:
@@ -848,21 +879,12 @@ def _ruled_joint_volumes(
         top_groove_band = _edge_band_on_face(
             section_face, boundary_edges, top_groove_width, tolerance
         )
-        surface_face = _matching_surface_face(section_face, split.surface, tolerance)
-        point = section_face.CenterOfMass
-        normal = _surface_normal_at_face(surface_face, point)
-        receiver = split.positive if lip_on == "negative" else split.negative
-        candidates = []
-        for candidate_direction in (normal, -normal):
-            candidate = _drafted_extrusion(
-                lip_band,
-                top_lip_band,
-                candidate_direction * lip_height,
-                draft_angle,
-            ).common(receiver)
-            volume = 0.0 if candidate.isNull() else candidate.Volume
-            candidates.append((volume, candidate_direction, candidate))
-        _volume, direction, lip_piece = max(candidates, key=lambda item: item[0])
+        lip_piece = _drafted_extrusion(
+            lip_band,
+            top_lip_band,
+            direction * lip_height,
+            draft_angle,
+        ).common(receiver)
         if lip_piece.isNull() or not lip_piece.Solids:
             continue
         groove_piece = _drafted_extrusion(
@@ -872,16 +894,6 @@ def _ruled_joint_volumes(
             draft_angle,
         )
         groove_piece.translate(-direction * tolerance)
-        if vertical_clearance > tolerance:
-            root_band = groove_band.cut(lip_band)
-            if not root_band.isNull() and root_band.Faces:
-                root_piece = _extrude_faces(
-                    root_band,
-                    -direction * (vertical_clearance * 0.5 + tolerance),
-                )
-                root_piece.translate(direction * tolerance)
-                if not root_piece.isNull():
-                    root_parts.extend(root_piece.Solids)
         if not lip_piece.isNull():
             lip_parts.extend(lip_piece.Solids)
         if not groove_piece.isNull():
@@ -894,12 +906,8 @@ def _ruled_joint_volumes(
     lip = _safe_refine(raw_lip)
     if lip.isNull() or not lip.Solids:
         raise ValueError("The receiving half contains no material for the sketch-seam lip.")
-    # Adjacent ruled panels use different local normals. Their prisms can form
-    # tiny mitre wedges at a sketch corner, so explicitly include the exact
-    # transferred lip in the wider/deeper groove tool. This guarantees that
-    # the two completed halves cannot retain overlapping corner material.
     groove = raw_groove
-    return lip, groove, _combine(root_parts)
+    return lip, groove, Part.Shape()
 
 
 def make_enclosure_with_sketch(
@@ -954,6 +962,9 @@ def make_enclosure_with_sketch(
         contours, contour_sides, contour_indices, lip_on, contour_mode
     )
     snap_assignments = _normalized_snap_assignments(contours, contour_snaps)
+    joint_positive_direction = ruled_contour_positive_direction(
+        split, contours[0].wire, tolerance
+    )
     negative = split.negative
     positive = split.positive
     lips = []
@@ -973,6 +984,7 @@ def make_enclosure_with_sketch(
             vertical_clearance,
             draft_angle,
             side,
+            joint_positive_direction,
             tolerance,
         )
         lips.append(lip)
@@ -998,14 +1010,11 @@ def make_enclosure_with_sketch(
         side = assignments[contour.index]
         if side == "none" or not snap_assignments[contour.index]:
             continue
-        positive_direction = ruled_contour_positive_direction(
-            split, contour.wire, tolerance
-        )
         receiver = split.positive if side == "negative" else split.negative
         bump, pocket = _snap_for_contour(
             split.section,
             contour.wire,
-            positive_direction,
+            joint_positive_direction,
             side,
             lip_width,
             lip_height,
@@ -1449,7 +1458,7 @@ def _plane_joint_volumes(
     direction = normal if lip_on == "negative" else -normal
     receiver = positive_half if lip_on == "negative" else negative_half
     draft_slope = math.tan(math.radians(draft_angle))
-    groove_depth = lip_height + vertical_clearance * 0.5
+    groove_depth = lip_height + vertical_clearance
     top_lip_width = lip_width - draft_slope * lip_height
     top_groove_lip_width = lip_width - draft_slope * groove_depth
     if top_lip_width <= tolerance or top_groove_lip_width + clearance <= tolerance:
@@ -1474,25 +1483,14 @@ def _plane_joint_volumes(
             "The receiving half contains no material inside the requested lip region."
         )
 
-    tip_clearance = vertical_clearance * 0.5
     groove = _drafted_extrusion(
         groove_footprint,
         top_groove_footprint,
-        direction * (lip_height + tip_clearance + tolerance * 2),
+        direction * (lip_height + vertical_clearance + tolerance * 2),
         draft_angle,
     )
     groove.translate(-direction * tolerance)
-
-    root_clearance = Part.Shape()
-    if vertical_clearance > tolerance:
-        root_band = groove_footprint.cut(lip_footprint)
-        if not root_band.isNull() and root_band.Faces:
-            root_clearance = _extrude_faces(
-                root_band,
-                -direction * (vertical_clearance * 0.5 + tolerance),
-            )
-            root_clearance.translate(direction * tolerance)
-    return lip, groove, root_clearance
+    return lip, groove, Part.Shape()
 
 
 def make_enclosure(

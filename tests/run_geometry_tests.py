@@ -20,6 +20,7 @@ from split2enclosure.geometry import (
     make_enclosure,
     make_enclosure_with_sketch,
     plane_from_axes,
+    ruled_contour_positive_direction,
     split_with_sketch,
 )
 from split2enclosure.config import DEFAULTS, load_defaults
@@ -175,7 +176,7 @@ class GeometryTests(unittest.TestCase):
         self.assertEqual(len(result.internal_wires), 2)
         self.assert_valid_pair(source, result)
 
-    def test_depth_clearance_is_shared_between_tip_and_root(self):
+    def test_depth_clearance_only_deepens_receiving_groove(self):
         source = hollow_box(open_top=False)
         origin, normal = plane_from_axes("XY", 10)
         without_clearance = make_enclosure(
@@ -188,7 +189,7 @@ class GeometryTests(unittest.TestCase):
             vertical_clearance=0.0,
             contour_mode="outer",
         )
-        symmetric = make_enclosure(
+        deepened = make_enclosure(
             source,
             origin,
             normal,
@@ -199,14 +200,53 @@ class GeometryTests(unittest.TestCase):
             contour_mode="outer",
         )
         self.assertTrue(without_clearance.root_clearance.isNull())
-        self.assertGreater(symmetric.root_clearance.Volume, 0.0)
+        self.assertTrue(deepened.root_clearance.isNull())
         self.assertAlmostEqual(
             without_clearance.lip.Volume,
-            symmetric.lip.Volume,
+            deepened.lip.Volume,
             places=6,
         )
-        self.assertLess(symmetric.negative.Volume, without_clearance.negative.Volume)
-        self.assertLess(symmetric.positive.Volume, without_clearance.positive.Volume)
+        self.assertAlmostEqual(
+            deepened.negative.Volume,
+            without_clearance.negative.Volume,
+            places=6,
+        )
+        self.assertLess(deepened.positive.Volume, without_clearance.positive.Volume)
+
+    def test_sketch_lips_use_one_global_axis(self):
+        source = hollow_box(open_top=False)
+        path = Part.makePolygon(
+            [
+                App.Vector(-5, 8, 0),
+                App.Vector(12, 8, 0),
+                App.Vector(18, 13, 0),
+                App.Vector(45, 13, 0),
+            ]
+        )
+        split, contours = analyze_sketch_contours(
+            source, path, App.Vector(0, 0, 1)
+        )
+        directions = [
+            ruled_contour_positive_direction(split, contour.wire)
+            for contour in contours
+        ]
+        self.assertTrue(directions)
+        self.assertTrue(all(direction == directions[0] for direction in directions))
+        self.assertEqual(
+            sum(abs(component) > 1e-9 for component in directions[0]),
+            1,
+        )
+        result = make_enclosure_with_sketch(
+            source,
+            path,
+            App.Vector(0, 0, 1),
+            lip_width=0.8,
+            lip_height=1.2,
+            clearance=0.2,
+            vertical_clearance=0.2,
+            contour_mode="outer",
+        )
+        self.assert_valid_pair(source, result)
 
     def test_optional_draft_tapers_plane_lip_and_groove(self):
         source = hollow_box(open_top=False)
