@@ -22,6 +22,17 @@ parameters = dialog.parameters()
 assert parameters["plane_mode"] == "Global XY"
 assert parameters["contour_mode"] == "outer"
 dialog.close()
+
+sketch = document.addObject("Part::Feature", "SplitSketch")
+sketch.Shape = Part.makePolygon(
+    [App.Vector(-2, 5, 0), App.Vector(5, 7, 0), App.Vector(12, 5, 0)]
+)
+sketch_dialog = EnclosureDialog(source, None, split_sketch=sketch)
+sketch_parameters = sketch_dialog.parameters()
+assert sketch_parameters["split_kind"] == "sketch"
+assert sketch_parameters["plane_mode"] == "Selected open sketch"
+assert not sketch_dialog.offset.isEnabled()
+sketch_dialog.close()
 App.closeDocument(document.Name)
 
 print("GUI module imported")

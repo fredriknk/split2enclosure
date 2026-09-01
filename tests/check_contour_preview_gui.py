@@ -7,6 +7,7 @@ import traceback
 import FreeCAD as App
 import FreeCADGui as Gui
 import Part
+import Sketcher
 from PySide import QtCore, QtWidgets
 
 
@@ -59,8 +60,40 @@ def run_check():
 
         dialog.reject()
         assert doc.getObject("Split2EnclosurePreview") is None
+
+        sketch = doc.addObject("Sketcher::SketchObject", "SplitPath")
+        sketch.addGeometry(
+            [
+                Part.LineSegment(App.Vector(-5, 15), App.Vector(12, 15)),
+                Part.LineSegment(App.Vector(12, 15), App.Vector(18, 20)),
+                Part.LineSegment(App.Vector(18, 20), App.Vector(27, 20)),
+                Part.LineSegment(App.Vector(27, 20), App.Vector(45, 13)),
+            ],
+            False,
+        )
+        doc.recompute()
+        sketch_dialog = EnclosureDialog(
+            source,
+            None,
+            Gui.getMainWindow(),
+            split_sketch=sketch,
+        )
+        assert sketch_dialog.plane_mode.currentText() == "Selected open sketch"
+        assert not sketch_dialog.offset.isEnabled()
+        QtWidgets.QMessageBox.warning = fail_warning
+        try:
+            sketch_dialog._build_preview()
+        finally:
+            QtWidgets.QMessageBox.warning = original_warning
+        assert sketch_dialog.contour_list.count() >= 2
+        assert sketch_dialog.parameters()["split_kind"] == "sketch"
+        assert len(sketch_dialog._preview_objects) == sketch_dialog.contour_list.count()
+        sketch_dialog.reject()
+        assert doc.getObject("Split2EnclosurePreview") is None
+
         print("SPLIT2ENCLOSURE_CONTOUR_PREVIEW_OK")
         dialog.deleteLater()
+        sketch_dialog.deleteLater()
         App.closeDocument(doc.Name)
     except Exception:
         traceback.print_exc()

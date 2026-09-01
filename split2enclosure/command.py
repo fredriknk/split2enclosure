@@ -7,7 +7,13 @@ import FreeCADGui as Gui
 import Part
 from PySide import QtCore, QtWidgets
 
-from .geometry import analyze_section_contours, make_enclosure, plane_from_axes
+from .geometry import (
+    analyze_section_contours,
+    analyze_sketch_contours,
+    make_enclosure,
+    make_enclosure_with_sketch,
+    plane_from_axes,
+)
 
 
 ICON_PATH = os.path.join(
@@ -27,10 +33,13 @@ def _selection_context():
     source = None
     selected_face = None
     selected_datum = None
+    selected_sketch = None
 
     for selection in Gui.Selection.getSelectionEx():
         obj = selection.Object
         shape = _shape_of(obj)
+        if obj.TypeId == "Sketcher::SketchObject" and shape is not None and shape.Edges:
+            selected_sketch = obj
         if source is None and shape is not None and shape.Solids:
             source = obj
         for subobject in selection.SubObjects:
@@ -43,7 +52,18 @@ def _selection_context():
                 selected_datum = face
 
     reference = selected_face or selected_datum
-    return source, reference
+    return source, reference, selected_sketch
+
+
+def _sketch_normal(sketch):
+    placement = (
+        sketch.getGlobalPlacement()
+        if hasattr(sketch, "getGlobalPlacement")
+        else sketch.Placement
+    )
+    normal = placement.Rotation.multVec(App.Vector(0, 0, 1))
+    normal.normalize()
+    return normal
 
 
 def _plane_from_face(face, offset):
@@ -57,10 +77,11 @@ def _plane_from_face(face, offset):
 
 
 class EnclosureDialog(QtWidgets.QDialog):
-    def __init__(self, source, reference_face, parent=None):
+    def __init__(self, source, reference_face, parent=None, split_sketch=None):
         super().__init__(parent)
         self.source = source
         self.reference_face = reference_face
+        self.split_sketch = split_sketch
         self._contours = []
         self._preview_group = None
         self._preview_objects = {}
@@ -86,6 +107,9 @@ class EnclosureDialog(QtWidgets.QDialog):
         if reference_face is not None:
             self.plane_mode.addItem("Selected planar face / datum")
             self.plane_mode.setCurrentIndex(3)
+        if split_sketch is not None:
+            self.plane_mode.addItem("Selected open sketch")
+            self.plane_mode.setCurrentIndex(self.plane_mode.count() - 1)
         form.addRow("Split plane", self.plane_mode)
 
         self.offset = self._length_box(-100000.0, 100000.0, 0.0)
@@ -155,7 +179,9 @@ class EnclosureDialog(QtWidgets.QDialog):
         self.select_none_button.clicked.connect(lambda: self._set_all_checked(False))
         self.contour_list.itemChanged.connect(self._item_changed)
         self.plane_mode.currentIndexChanged.connect(self._invalidate_preview)
+        self.plane_mode.currentIndexChanged.connect(self._update_split_controls)
         self.offset.valueChanged.connect(self._invalidate_preview)
+        self._update_split_controls()
 
     @staticmethod
     def _length_box(minimum, maximum, value):
@@ -170,11 +196,29 @@ class EnclosureDialog(QtWidgets.QDialog):
     def _plane_parameters(self):
         mode = self.plane_mode.currentText()
         offset = self.offset.value()
-        if mode.startswith("Global"):
+        if mode == "Selected open sketch":
+            placement = (
+                self.split_sketch.getGlobalPlacement()
+                if hasattr(self.split_sketch, "getGlobalPlacement")
+                else self.split_sketch.Placement
+            )
+            origin = placement.Base
+            normal = _sketch_normal(self.split_sketch)
+            offset = 0.0
+        elif mode.startswith("Global"):
             origin, normal = plane_from_axes(mode.split()[-1], offset)
         else:
             origin, normal = _plane_from_face(self.reference_face, offset)
         return mode, offset, origin, normal
+
+    def _update_split_controls(self, *_args):
+        sketch_mode = self.plane_mode.currentText() == "Selected open sketch"
+        self.offset.setEnabled(not sketch_mode)
+        self.offset.setToolTip(
+            "Sketch splits use the sketch path directly"
+            if sketch_mode
+            else "Distance along the plane's positive normal"
+        )
 
     def parameters(self):
         mode, offset, origin, normal = self._plane_parameters()
@@ -190,16 +234,25 @@ class EnclosureDialog(QtWidgets.QDialog):
             "contour_indices": self._selected_contour_indices,
             "plane_mode": mode,
             "offset": offset,
+            "split_kind": "sketch" if mode == "Selected open sketch" else "plane",
+            "split_sketch": self.split_sketch,
         }
 
     def _build_preview(self):
         self._cleanup_preview(clear_list=True)
         self.preview_button.setText("Preview / choose contours")
         try:
-            _mode, _offset, origin, normal = self._plane_parameters()
-            _section, _plane, self._contours = analyze_section_contours(
-                self.source.Shape, origin, normal
-            )
+            mode, _offset, origin, normal = self._plane_parameters()
+            if mode == "Selected open sketch":
+                _split, self._contours = analyze_sketch_contours(
+                    self.source.Shape,
+                    self.split_sketch.Shape,
+                    normal,
+                )
+            else:
+                _section, _plane, self._contours = analyze_section_contours(
+                    self.source.Shape, origin, normal
+                )
             if not self._contours:
                 raise ValueError("No closed contours were found on this split plane.")
 
@@ -383,6 +436,7 @@ def _add_result_to_document(source, result, parameters):
         container.Label = "Split enclosure: {}".format(source.Label)
         container.addProperty("App::PropertyLink", "Source", "Split parameters")
         container.addProperty("App::PropertyString", "PlaneMode", "Split parameters")
+        container.addProperty("App::PropertyLink", "SplitSketch", "Split parameters")
         container.addProperty("App::PropertyVector", "PlaneOrigin", "Split parameters")
         container.addProperty("App::PropertyVector", "PlaneNormal", "Split parameters")
         container.addProperty("App::PropertyLength", "PlaneOffset", "Split parameters")
@@ -396,6 +450,7 @@ def _add_result_to_document(source, result, parameters):
         container.addProperty("App::PropertyInteger", "JointContours", "Diagnostics")
 
         container.Source = source
+        container.SplitSketch = parameters.get("split_sketch")
         container.PlaneMode = parameters["plane_mode"]
         container.PlaneOrigin = parameters["plane_origin"]
         container.PlaneNormal = parameters["plane_normal"]
@@ -441,17 +496,22 @@ def _add_result_to_document(source, result, parameters):
 
 
 def run():
-    source, reference_face = _selection_context()
+    source, reference_face, split_sketch = _selection_context()
     if source is None:
         QtWidgets.QMessageBox.warning(
             Gui.getMainWindow(),
             "Split to enclosure",
-            "Select one solid object first. Optionally also select a planar face "
-            "or datum plane as the split reference.",
+            "Select one solid object first. Optionally also select an open sketch, "
+            "planar face, or datum plane as the split reference.",
         )
         return
 
-    dialog = EnclosureDialog(source, reference_face, Gui.getMainWindow())
+    dialog = EnclosureDialog(
+        source,
+        reference_face,
+        Gui.getMainWindow(),
+        split_sketch=split_sketch,
+    )
     if dialog.exec() != QtWidgets.QDialog.Accepted:
         return
     try:
@@ -459,7 +519,20 @@ def run():
         engine_parameters = dict(parameters)
         engine_parameters.pop("plane_mode")
         engine_parameters.pop("offset")
-        result = make_enclosure(source.Shape, **engine_parameters)
+        split_kind = engine_parameters.pop("split_kind")
+        selected_sketch = engine_parameters.pop("split_sketch")
+        if split_kind == "sketch":
+            plane_origin = engine_parameters.pop("plane_origin")
+            sketch_normal = engine_parameters.pop("plane_normal")
+            del plane_origin
+            result = make_enclosure_with_sketch(
+                source.Shape,
+                selected_sketch.Shape,
+                sketch_normal,
+                **engine_parameters,
+            )
+        else:
+            result = make_enclosure(source.Shape, **engine_parameters)
         _add_result_to_document(source, result, parameters)
     except Exception as exc:
         App.Console.PrintError("Split2Enclosure: {}\n".format(exc))
