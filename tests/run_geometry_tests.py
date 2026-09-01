@@ -35,6 +35,36 @@ def hollow_box(open_top=True):
 
 
 class GeometryTests(unittest.TestCase):
+    def assert_contour_sweep_covered(
+        self,
+        wire,
+        lip,
+        direction,
+        lip_height,
+        tolerance=1e-5,
+    ):
+        samples = []
+        for edge in wire.Edges:
+            for point in edge.discretize(Deflection=0.5):
+                if not samples or (point - samples[-1]).Length > 1e-7:
+                    samples.append(point)
+        self.assertTrue(samples)
+        epsilon = min(lip_height * 1e-4, 1e-4)
+        for position in (
+            epsilon,
+            lip_height * 0.25,
+            lip_height * 0.5,
+            lip_height * 0.75,
+            lip_height - epsilon,
+        ):
+            for point in samples:
+                swept_point = Part.Vertex(point + direction * position)
+                self.assertLess(
+                    swept_point.distToShape(lip)[0],
+                    tolerance,
+                    "The lip must cover the complete contour along its assembly axis",
+                )
+
     def test_user_config_merges_valid_defaults_and_rejects_bad_files(self):
         with tempfile.TemporaryDirectory() as directory:
             path = os.path.join(directory, "defaults.json")
@@ -248,6 +278,14 @@ class GeometryTests(unittest.TestCase):
             contour_mode="outer",
         )
         self.assert_valid_pair(source, result)
+        for contour in contours:
+            if contour.kind == "outer":
+                self.assert_contour_sweep_covered(
+                    contour.wire,
+                    result.lip,
+                    directions[0],
+                    1.2,
+                )
 
     def test_splitbox_diagonal_sketch_uses_principal_axis_and_matched_volumes(self):
         path = os.path.join(PROJECT_ROOT, "examples", "Splitbox_test.FCStd")
@@ -276,6 +314,20 @@ class GeometryTests(unittest.TestCase):
             self.assertEqual(len(result.lip.Solids), 1)
             self.assertEqual(len(result.groove.Solids), 1)
             self.assertLess(result.lip.cut(result.groove).Volume, 1e-6)
+            self.assert_contour_sweep_covered(
+                contours[0].wire,
+                result.lip,
+                direction,
+                2.0,
+            )
+            for distance in (0.05, 0.2, 0.5, 1.0, 2.0, 2.2, 3.0, 5.0):
+                moving_half = result.negative.copy()
+                moving_half.translate(-direction * distance)
+                self.assertLess(
+                    moving_half.common(result.positive).Volume,
+                    1e-6,
+                    "The halves must separate along the principal assembly axis",
+                )
         finally:
             App.closeDocument(document.Name)
 
