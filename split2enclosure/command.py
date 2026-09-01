@@ -7,7 +7,7 @@ import FreeCADGui as Gui
 import Part
 from PySide import QtCore, QtWidgets
 
-from .geometry import make_enclosure, plane_from_axes
+from .geometry import analyze_section_contours, make_enclosure, plane_from_axes
 
 
 ICON_PATH = os.path.join(
@@ -61,8 +61,15 @@ class EnclosureDialog(QtWidgets.QDialog):
         super().__init__(parent)
         self.source = source
         self.reference_face = reference_face
+        self._contours = []
+        self._preview_group = None
+        self._preview_objects = {}
+        self._selection_observer_active = False
+        self._updating_checks = False
+        self._selected_contour_indices = None
+        self._source_view_state = None
         self.setWindowTitle("Split to enclosure")
-        self.setMinimumWidth(390)
+        self.setMinimumWidth(480)
 
         layout = QtWidgets.QVBoxLayout(self)
         source_label = QtWidgets.QLabel(
@@ -90,14 +97,6 @@ class EnclosureDialog(QtWidgets.QDialog):
         self.lip_side.addItem("Positive half", "positive")
         form.addRow("Lip belongs to", self.lip_side)
 
-        self.contour_mode = QtWidgets.QComboBox()
-        self.contour_mode.addItem("Outermost perimeter(s)", "outer")
-        self.contour_mode.addItem("Internal contours", "internal")
-        self.contour_mode.setToolTip(
-            "Outermost mode ignores holes and nested section details"
-        )
-        form.addRow("Joint follows", self.contour_mode)
-
         self.lip_width = self._length_box(0.01, 1000.0, 1.0)
         self.lip_height = self._length_box(0.01, 1000.0, 2.0)
         self.clearance = self._length_box(0.0, 100.0, 0.2)
@@ -107,10 +106,38 @@ class EnclosureDialog(QtWidgets.QDialog):
         form.addRow("Side clearance", self.clearance)
         form.addRow("Depth clearance", self.vertical_clearance)
 
+        contour_group = QtWidgets.QGroupBox("Joint contours")
+        contour_layout = QtWidgets.QVBoxLayout(contour_group)
+        contour_buttons = QtWidgets.QHBoxLayout()
+        self.preview_button = QtWidgets.QPushButton("Preview / choose contours")
+        self.select_all_button = QtWidgets.QPushButton("All")
+        self.select_none_button = QtWidgets.QPushButton("None")
+        contour_buttons.addWidget(self.preview_button)
+        contour_buttons.addStretch(1)
+        contour_buttons.addWidget(self.select_all_button)
+        contour_buttons.addWidget(self.select_none_button)
+        contour_layout.addLayout(contour_buttons)
+
+        self.contour_list = QtWidgets.QListWidget()
+        self.contour_list.setMinimumHeight(125)
+        self.contour_list.setToolTip(
+            "Check contours here, or click their green/red preview wires in the 3D view"
+        )
+        contour_layout.addWidget(self.contour_list)
+        legend = QtWidgets.QLabel(
+            "<span style='color:#20c050'>Green = included</span> &nbsp; "
+            "<span style='color:#e04040'>Red = excluded</span>. "
+            "Outermost contours are selected initially."
+        )
+        legend.setTextFormat(QtCore.Qt.RichText)
+        legend.setWordWrap(True)
+        contour_layout.addWidget(legend)
+        layout.addWidget(contour_group)
+
         note = QtWidgets.QLabel(
-            "Outermost mode ignores holes and keeps the band on the material "
-            "side of each exterior section perimeter. Clearance is centered "
-            "around the lip."
+            "Side clearance widens only the groove's material-side mating face; "
+            "it does not move the lip away from the chosen perimeter. The lip "
+            "is taken from the receiving half so holes and local details remain."
         )
         note.setWordWrap(True)
         layout.addWidget(note)
@@ -123,6 +150,13 @@ class EnclosureDialog(QtWidgets.QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
+        self.preview_button.clicked.connect(self._build_preview)
+        self.select_all_button.clicked.connect(lambda: self._set_all_checked(True))
+        self.select_none_button.clicked.connect(lambda: self._set_all_checked(False))
+        self.contour_list.itemChanged.connect(self._item_changed)
+        self.plane_mode.currentIndexChanged.connect(self._invalidate_preview)
+        self.offset.valueChanged.connect(self._invalidate_preview)
+
     @staticmethod
     def _length_box(minimum, maximum, value):
         box = QtWidgets.QDoubleSpinBox()
@@ -133,13 +167,17 @@ class EnclosureDialog(QtWidgets.QDialog):
         box.setSingleStep(0.1)
         return box
 
-    def parameters(self):
+    def _plane_parameters(self):
         mode = self.plane_mode.currentText()
         offset = self.offset.value()
         if mode.startswith("Global"):
             origin, normal = plane_from_axes(mode.split()[-1], offset)
         else:
             origin, normal = _plane_from_face(self.reference_face, offset)
+        return mode, offset, origin, normal
+
+    def parameters(self):
+        mode, offset, origin, normal = self._plane_parameters()
         return {
             "plane_origin": origin,
             "plane_normal": normal,
@@ -148,10 +186,193 @@ class EnclosureDialog(QtWidgets.QDialog):
             "clearance": self.clearance.value(),
             "vertical_clearance": self.vertical_clearance.value(),
             "lip_on": self.lip_side.currentData(),
-            "contour_mode": self.contour_mode.currentData(),
+            "contour_mode": "outer",
+            "contour_indices": self._selected_contour_indices,
             "plane_mode": mode,
             "offset": offset,
         }
+
+    def _build_preview(self):
+        self._cleanup_preview(clear_list=True)
+        self.preview_button.setText("Preview / choose contours")
+        try:
+            _mode, _offset, origin, normal = self._plane_parameters()
+            _section, _plane, self._contours = analyze_section_contours(
+                self.source.Shape, origin, normal
+            )
+            if not self._contours:
+                raise ValueError("No closed contours were found on this split plane.")
+
+            doc = self.source.Document
+            self._preview_group = doc.addObject(
+                "App::DocumentObjectGroup", "Split2EnclosurePreview"
+            )
+            self._preview_group.Label = "Split2Enclosure contour preview (temporary)"
+            self._source_view_state = (
+                self.source.ViewObject.Visibility,
+                self.source.ViewObject.Transparency,
+            )
+            self.source.ViewObject.Visibility = True
+            self.source.ViewObject.Transparency = max(
+                self.source.ViewObject.Transparency, 70
+            )
+
+            self._updating_checks = True
+            for contour in self._contours:
+                included = contour.kind == "outer"
+                item = QtWidgets.QListWidgetItem(
+                    "#{:02d}  {:8s}   area {:9.2f} mm²   length {:9.2f} mm".format(
+                        contour.index + 1,
+                        contour.kind,
+                        contour.area,
+                        contour.length,
+                    )
+                )
+                item.setFlags(
+                    item.flags()
+                    | QtCore.Qt.ItemIsUserCheckable
+                    | QtCore.Qt.ItemIsEnabled
+                    | QtCore.Qt.ItemIsSelectable
+                )
+                item.setData(QtCore.Qt.UserRole, contour.index)
+                item.setCheckState(
+                    QtCore.Qt.Checked if included else QtCore.Qt.Unchecked
+                )
+                self.contour_list.addItem(item)
+
+                preview = doc.addObject("Part::Feature", "Split2EnclosureContour")
+                preview.Label = "Contour #{:02d} ({})".format(
+                    contour.index + 1, contour.kind
+                )
+                preview.Shape = contour.wire
+                preview.addProperty("App::PropertyInteger", "ContourIndex")
+                preview.ContourIndex = contour.index
+                preview.ViewObject.LineWidth = 6.0
+                preview.ViewObject.PointSize = 8.0
+                preview.ViewObject.Selectable = True
+                self._preview_group.addObject(preview)
+                self._preview_objects[preview.Name] = contour.index
+                self._set_preview_color(contour.index, included)
+            self._updating_checks = False
+            doc.recompute()
+            if hasattr(Gui, "Selection"):
+                Gui.Selection.addObserver(self)
+                self._selection_observer_active = True
+        except Exception as exc:
+            self._updating_checks = False
+            self._cleanup_preview(clear_list=True)
+            QtWidgets.QMessageBox.warning(
+                self, "Contour preview", str(exc)
+            )
+
+    def _set_preview_color(self, index, included):
+        for name, mapped_index in self._preview_objects.items():
+            if mapped_index != index:
+                continue
+            obj = self.source.Document.getObject(name)
+            if obj is not None:
+                color = (0.15, 0.90, 0.25) if included else (0.95, 0.20, 0.20)
+                obj.ViewObject.LineColor = color
+                obj.ViewObject.PointColor = color
+
+    def _item_for_index(self, index):
+        for row in range(self.contour_list.count()):
+            item = self.contour_list.item(row)
+            if int(item.data(QtCore.Qt.UserRole)) == index:
+                return item
+        return None
+
+    def _item_changed(self, item):
+        if self._updating_checks:
+            return
+        index = int(item.data(QtCore.Qt.UserRole))
+        self._set_preview_color(index, item.checkState() == QtCore.Qt.Checked)
+
+    def _set_all_checked(self, included):
+        state = QtCore.Qt.Checked if included else QtCore.Qt.Unchecked
+        for row in range(self.contour_list.count()):
+            self.contour_list.item(row).setCheckState(state)
+
+    def addSelection(self, document_name, object_name, _sub_name, _point):
+        if document_name != self.source.Document.Name:
+            return
+        index = self._preview_objects.get(object_name)
+        if index is None:
+            return
+        item = self._item_for_index(index)
+        if item is not None:
+            item.setCheckState(
+                QtCore.Qt.Unchecked
+                if item.checkState() == QtCore.Qt.Checked
+                else QtCore.Qt.Checked
+            )
+        if hasattr(Gui, "Selection"):
+            Gui.Selection.clearSelection()
+
+    def _invalidate_preview(self, *_args):
+        if self._contours or self._preview_objects:
+            self._cleanup_preview(clear_list=True)
+            self.preview_button.setText("Plane changed — preview again")
+
+    def _cleanup_preview(self, clear_list=False):
+        if self._selection_observer_active:
+            Gui.Selection.removeObserver(self)
+            self._selection_observer_active = False
+        if hasattr(Gui, "Selection"):
+            Gui.Selection.clearSelection()
+        try:
+            doc = self.source.Document
+        except (ReferenceError, RuntimeError):
+            doc = None
+        if doc is None:
+            self._preview_objects.clear()
+            self._preview_group = None
+            self._source_view_state = None
+            return
+        for name in list(self._preview_objects):
+            if doc.getObject(name) is not None:
+                doc.removeObject(name)
+        self._preview_objects.clear()
+        if self._preview_group is not None:
+            if doc.getObject(self._preview_group.Name) is not None:
+                doc.removeObject(self._preview_group.Name)
+            self._preview_group = None
+        if self._source_view_state is not None:
+            visibility, transparency = self._source_view_state
+            self.source.ViewObject.Visibility = visibility
+            self.source.ViewObject.Transparency = transparency
+            self._source_view_state = None
+        if clear_list:
+            self._updating_checks = True
+            self.contour_list.clear()
+            self._updating_checks = False
+            self._contours = []
+            self._selected_contour_indices = None
+        doc.recompute()
+
+    def accept(self):
+        if self._contours:
+            selected = []
+            for row in range(self.contour_list.count()):
+                item = self.contour_list.item(row)
+                if item.checkState() == QtCore.Qt.Checked:
+                    selected.append(int(item.data(QtCore.Qt.UserRole)))
+            if not selected:
+                QtWidgets.QMessageBox.warning(
+                    self, "Split to enclosure", "Select at least one joint contour."
+                )
+                return
+            self._selected_contour_indices = selected
+        self._cleanup_preview(clear_list=False)
+        super().accept()
+
+    def reject(self):
+        self._cleanup_preview(clear_list=True)
+        super().reject()
+
+    def closeEvent(self, event):
+        self._cleanup_preview(clear_list=True)
+        super().closeEvent(event)
 
 
 def _add_result_to_document(source, result, parameters):
@@ -171,6 +392,7 @@ def _add_result_to_document(source, result, parameters):
         container.addProperty("App::PropertyLength", "DepthClearance", "Joint parameters")
         container.addProperty("App::PropertyString", "LipSide", "Joint parameters")
         container.addProperty("App::PropertyString", "ContourMode", "Joint parameters")
+        container.addProperty("App::PropertyString", "ContourSelection", "Joint parameters")
         container.addProperty("App::PropertyInteger", "JointContours", "Diagnostics")
 
         container.Source = source
@@ -183,7 +405,14 @@ def _add_result_to_document(source, result, parameters):
         container.SideClearance = parameters["clearance"]
         container.DepthClearance = parameters["vertical_clearance"]
         container.LipSide = parameters["lip_on"]
-        container.ContourMode = parameters["contour_mode"]
+        container.ContourMode = (
+            "selected"
+            if parameters.get("contour_indices") is not None
+            else parameters["contour_mode"]
+        )
+        container.ContourSelection = ",".join(
+            str(index + 1) for index in (parameters.get("contour_indices") or [])
+        )
         container.JointContours = len(result.internal_wires)
 
         negative = doc.addObject("Part::Feature", "EnclosureNegative")

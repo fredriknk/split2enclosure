@@ -20,6 +20,7 @@ source.Shape = Part.makeBox(10, 10, 10)
 dialog = EnclosureDialog(source, None)
 parameters = dialog.parameters()
 assert parameters["plane_mode"] == "Global XY"
+assert parameters["contour_mode"] == "outer"
 dialog.close()
 App.closeDocument(document.Name)
 

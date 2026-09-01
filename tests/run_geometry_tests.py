@@ -1,15 +1,21 @@
 import os
 import sys
 import unittest
+from unittest import mock
 
 import FreeCAD as App
 import Part
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if PROJECT_ROOT not in sys.path:
+if not os.environ.get("SPLIT2ENCLOSURE_TEST_INSTALLED") and PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from split2enclosure.geometry import make_enclosure, plane_from_axes
+from split2enclosure.geometry import (
+    _safe_refine,
+    analyze_section_contours,
+    make_enclosure,
+    plane_from_axes,
+)
 
 
 def hollow_box(open_top=True):
@@ -20,6 +26,17 @@ def hollow_box(open_top=True):
 
 
 class GeometryTests(unittest.TestCase):
+    def test_failed_optional_refinement_keeps_original_shape(self):
+        class RefinementFailure:
+            def isNull(self):
+                return False
+
+            def removeSplitter(self):
+                raise RuntimeError("FuseEdges : Fusion failed")
+
+        original = RefinementFailure()
+        self.assertIs(_safe_refine(original), original)
+
     def assert_valid_pair(self, source, result):
         self.assertTrue(result.negative.isValid())
         self.assertTrue(result.positive.isValid())
@@ -98,6 +115,139 @@ class GeometryTests(unittest.TestCase):
             clearance=0.15,
             vertical_clearance=0.1,
         )
+        self.assertEqual(len(result.internal_wires), 1)
+        self.assert_valid_pair(source, result)
+
+    def test_section_with_small_circular_through_holes(self):
+        source = hollow_box(open_top=False)
+        holes = [
+            Part.makeCylinder(0.55, 20, App.Vector(1, 8, 0)),
+            Part.makeCylinder(0.55, 20, App.Vector(1, 22, 0)),
+            Part.makeCylinder(0.55, 20, App.Vector(39, 8, 0)),
+            Part.makeCylinder(0.55, 20, App.Vector(39, 22, 0)),
+        ]
+        for hole in holes:
+            source = source.cut(hole)
+        origin, normal = plane_from_axes("XY", 10)
+        result = make_enclosure(
+            source,
+            origin,
+            normal,
+            lip_width=0.7,
+            lip_height=1.0,
+            clearance=0.2,
+            vertical_clearance=0.1,
+        )
+        self.assertEqual(len(result.internal_wires), 5)
+        self.assert_valid_pair(source, result)
+
+    def test_outer_mode_ignores_nested_holes(self):
+        source = hollow_box(open_top=False)
+        holes = []
+        for x, y in ((1, 8), (1, 22), (39, 8), (39, 22)):
+            hole = Part.makeCylinder(0.55, 20, App.Vector(x, y, 0))
+            holes.append(hole)
+            source = source.cut(hole)
+        origin, normal = plane_from_axes("XY", 10)
+        result = make_enclosure(
+            source,
+            origin,
+            normal,
+            lip_width=0.7,
+            lip_height=1.0,
+            clearance=0.2,
+            vertical_clearance=0.1,
+            contour_mode="outer",
+        )
+        self.assertEqual(len(result.internal_wires), 1)
+        for hole in holes:
+            self.assertLess(result.lip.common(hole).Volume, 1e-6)
+        self.assert_valid_pair(source, result)
+
+    def test_side_clearance_does_not_shift_or_shrink_lip(self):
+        source = hollow_box(open_top=False)
+        origin, normal = plane_from_axes("XY", 10)
+        no_clearance = make_enclosure(
+            source,
+            origin,
+            normal,
+            lip_width=0.7,
+            lip_height=1.0,
+            clearance=0.0,
+            vertical_clearance=0.1,
+            contour_mode="outer",
+        )
+        with_clearance = make_enclosure(
+            source,
+            origin,
+            normal,
+            lip_width=0.7,
+            lip_height=1.0,
+            clearance=0.4,
+            vertical_clearance=0.1,
+            contour_mode="outer",
+        )
+        self.assertAlmostEqual(
+            no_clearance.lip.Volume, with_clearance.lip.Volume, places=6
+        )
+        self.assertGreater(with_clearance.groove.Volume, no_clearance.groove.Volume)
+
+    def test_outer_mode_supports_a_solid_block(self):
+        source = Part.makeBox(10, 10, 10)
+        origin, normal = plane_from_axes("XY", 5)
+        result = make_enclosure(
+            source,
+            origin,
+            normal,
+            lip_width=0.7,
+            lip_height=1.0,
+            clearance=0.2,
+            vertical_clearance=0.1,
+            contour_mode="outer",
+        )
+        self.assertEqual(len(result.internal_wires), 1)
+        self.assert_valid_pair(source, result)
+
+    def test_explicit_contour_selection_uses_preview_indices(self):
+        source = hollow_box(open_top=False)
+        source = source.cut(
+            Part.makeCylinder(0.55, 20, App.Vector(1, 8, 0))
+        )
+        origin, normal = plane_from_axes("XY", 10)
+        _section, _plane, contours = analyze_section_contours(
+            source, origin, normal
+        )
+        self.assertEqual(contours[0].kind, "outer")
+        self.assertTrue(any(contour.kind == "internal" for contour in contours))
+        result = make_enclosure(
+            source,
+            origin,
+            normal,
+            lip_width=0.7,
+            lip_height=1.0,
+            clearance=0.2,
+            vertical_clearance=0.1,
+            contour_indices=[0],
+        )
+        self.assertEqual(len(result.internal_wires), 1)
+        self.assert_valid_pair(source, result)
+
+    def test_polygon_fallback_when_occ_offset_rejects_contour(self):
+        source = hollow_box(open_top=False)
+        origin, normal = plane_from_axes("XY", 10)
+        with mock.patch(
+            "split2enclosure.geometry._offset_fill",
+            side_effect=ValueError("simulated OCC offset failure"),
+        ):
+            result = make_enclosure(
+                source,
+                origin,
+                normal,
+                lip_width=0.7,
+                lip_height=1.0,
+                clearance=0.2,
+                vertical_clearance=0.1,
+            )
         self.assertEqual(len(result.internal_wires), 1)
         self.assert_valid_pair(source, result)
 

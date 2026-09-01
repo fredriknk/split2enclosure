@@ -1,24 +1,24 @@
 # Split2Enclosure
 
-Split2Enclosure is a FreeCAD 1.1 workbench that turns a hollow solid into two
+Split2Enclosure is a FreeCAD 1.1 workbench that turns a solid into two
 printable enclosure halves with a matched lip and groove.
 
-The current MVP:
+Features:
 
 - splits a solid on global XY, XZ, or YZ, with a signed offset;
 - accepts a selected planar face or Part Design datum plane as the reference;
-- can follow the **outermost perimeter(s)** or all nested internal contours in
-  the planar wall cross-section;
+- previews every closed split-plane contour directly in the 3D view;
+- lets contours be included or excluded using checkboxes or by clicking their
+  green/red preview wires;
 - adds a lip to either half and cuts a wider/deeper groove into the other;
-- supports multiple internal contours, such as cavities separated by a divider;
+- takes the lip geometry from the receiving half, preserving holes, slopes,
+  and details that change immediately after the split plane;
 - leaves the source untouched and creates two static `Part::Feature` results.
 
-## Install for development
+## Install
 
-Copy or junction the complete repository folder into FreeCAD's user `Mod`
-directory. In FreeCAD, that location is available from **Edit → Preferences →
-Python → Macro** / the user application-data directory; on a typical Windows
-FreeCAD 1.1 installation it is:
+Clone or copy the complete repository folder into FreeCAD's user `Mod`
+directory. On a typical Windows FreeCAD 1.1 installation it is:
 
 ```text
 %APPDATA%\FreeCAD\v1-1\Mod\Split2Enclosure
@@ -32,10 +32,12 @@ Python package.
 
 1. Select one object whose `Shape` contains a valid solid.
 2. Optionally Ctrl-select a planar face or a Part Design datum plane.
-3. Run **Split2Enclosure → Split to enclosure**.
-4. Choose the plane, signed plane offset, outer/internal contour mode, lip
-   side, lip width/height, and the side/depth clearances.
-5. Press **Create**. The original is hidden and an App Part containing the two
+3. Run **Split2Enclosure > Split to enclosure**.
+4. Choose the plane and signed offset, then press **Preview / choose contours**.
+5. Included contours are green and excluded contours are red. Toggle them in
+   the list or click their wires in the 3D view.
+6. Choose the lip side, lip width/height, and side/depth clearances.
+7. Press **Create**. The original is hidden and an App Part containing the two
    resulting halves is added to the document.
 
 Plane normals and positive offset directions are:
@@ -46,18 +48,21 @@ Plane normals and positive offset directions are:
 | XZ | +Y |
 | YZ | +X |
 
-`Side clearance` is the total groove-minus-lip width. The lip is centered in
-that groove, giving half the value on each side. `Depth clearance` is added to
-the groove depth beyond the lip height.
+`Side clearance` is added only at the material-side mating face: the lip stays
+anchored to the selected perimeter and the groove extends farther into the
+wall. `Depth clearance` is added beyond the lip height.
 
 ## Geometry model
 
-The engine intersects the source BRep with the split plane. It classifies the
-outermost contour of each disconnected section as exterior and every nested
-contour as internal. It builds a two-sided planar offset band around the chosen
-contours, clips that band to the actual wall material, then extrudes the lip
-and groove normal to the split plane. Outermost mode therefore ignores screw
-holes and other nested openings.
+The engine intersects the source BRep with the split plane and classifies every
+closed contour for display. It builds a two-sided planar offset band around the
+user-selected contours and clips that band to the actual wall material.
+
+The groove is cut with a widened/deepened band. The nominal lip prism is first
+intersected with the unmodified receiving half, and only that existing material
+is transferred to the lip half. Consequently, holes, slopes, curved walls, and
+features beginning immediately after the split plane remain in the lip instead
+of being covered by a uniform extrusion.
 
 Full-circle contours use an exact analytic offset because OpenCASCADE's 2D
 offset builder can return a null result for a wire made from one circular edge.
@@ -71,13 +76,14 @@ derived directly from the final solid.
 ## Current limitations
 
 - The source must be a BRep solid, not a mesh. Convert meshes before running.
-- Internal joint paths must be closed. A vertical cut through an open-top shell
-  produces an open U-shaped cavity boundary and is deliberately rejected.
+- Joint paths must be closed. A vertical cut through an open-top shell can
+  produce an open U-shaped cavity boundary, which cannot yet be selected.
 - Very thin walls, tight concave radii, or a lip wider than the available wall
-  can make OpenCASCADE offsets fail. Reduce width/clearance or move the plane.
-- Results are static features in this MVP. Change parameters by deleting the
-  result group and running the command again.
-- Draft angle is not yet applied; lip walls are normal to the split plane.
+  can make offsets fail. Reduce width/clearance or move the plane.
+- Results are static features. Change parameters by deleting the result group
+  and running the command again.
+- Draft angle is not yet applied; lip walls follow the receiving half's local
+  geometry but the limiting prism is normal to the split plane.
 
 ## Tests and sample
 
@@ -92,3 +98,7 @@ Generate a visual `.FCStd` example:
 ```powershell
 & 'C:\Program Files\FreeCAD 1.1\bin\FreeCADCmd.exe' 'examples\create_sample.py'
 ```
+
+## License
+
+Split2Enclosure is released under the [MIT License](LICENSE).

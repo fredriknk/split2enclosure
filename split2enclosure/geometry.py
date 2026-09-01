@@ -28,6 +28,17 @@ class EnclosureResult:
     internal_wires: list
 
 
+@dataclass
+class ContourInfo:
+    """A selectable closed contour in a split-plane section."""
+
+    index: int
+    kind: str
+    wire: Part.Shape
+    area: float
+    length: float
+
+
 def _unit(vector):
     result = App.Vector(vector)
     if result.Length <= DEFAULT_TOLERANCE:
@@ -208,6 +219,52 @@ def _joint_wires(section, tolerance, contour_mode):
     raise ValueError("contour_mode must be 'outer' or 'internal'.")
 
 
+def analyze_section_contours(
+    shape,
+    plane_origin,
+    plane_normal,
+    tolerance=DEFAULT_TOLERANCE,
+):
+    """Return the section, covering plane, and all selectable closed contours.
+
+    Outermost contours are listed first, followed by nested/internal contours;
+    each group is ordered by descending enclosed area for stable GUI indices.
+    """
+
+    if shape is None or shape.isNull() or not shape.Solids:
+        raise ValueError("Select a non-empty solid BRep shape.")
+    origin = App.Vector(plane_origin)
+    normal = _unit(plane_normal)
+    tolerance = max(float(tolerance), DEFAULT_TOLERANCE)
+    plane_face = _make_plane_face(shape, origin, normal)
+    section = shape.common(plane_face)
+    if not section.Faces or section.Area <= tolerance * tolerance:
+        raise ValueError("The split plane does not cross a solid wall section.")
+
+    outer, internal = _classified_wires(section, tolerance)
+
+    def by_area_descending(wires):
+        return sorted(wires, key=lambda wire: Part.Face(wire).Area, reverse=True)
+
+    classified = [
+        ("outer", wire) for wire in by_area_descending(outer)
+    ] + [
+        ("internal", wire) for wire in by_area_descending(internal)
+    ]
+    contours = []
+    for index, (kind, wire) in enumerate(classified):
+        contours.append(
+            ContourInfo(
+                index=index,
+                kind=kind,
+                wire=wire,
+                area=Part.Face(wire).Area,
+                length=wire.Length,
+            )
+        )
+    return section, plane_face, contours
+
+
 def _offset_fill(wire, distance):
     # OpenCASCADE's 2D offset builder can return a null shape for a closed wire
     # containing one full-circle edge. Construct that elementary offset
@@ -367,15 +424,13 @@ def _joint_footprints(section, wires, lip_width, clearance, tolerance):
     section_material = _combine_faces(section.Faces)
     lip_parts = []
     groove_parts = []
-    lip_near = clearance * 0.5
-    lip_far = lip_near + lip_width
     groove_far = lip_width + clearance
 
     for wire in wires:
-        lip_zone = _zone_around_wire(wire, lip_far, tolerance)
-        if lip_near > tolerance:
-            near_zone = _zone_around_wire(wire, lip_near, tolerance)
-            lip_zone = lip_zone.cut(near_zone)
+        # Keep the lip anchored to the selected wall perimeter. Clearance is
+        # added only at its material-side mating face by widening the groove;
+        # it must not move the lip away from the perimeter itself.
+        lip_zone = _zone_around_wire(wire, lip_width, tolerance)
         lip_part = lip_zone.common(section_material)
         groove_part = _zone_around_wire(
             wire, groove_far, tolerance
@@ -422,19 +477,24 @@ def make_enclosure(
     vertical_clearance=0.2,
     lip_on="negative",
     contour_mode="internal",
+    contour_indices=None,
     tolerance=DEFAULT_TOLERANCE,
 ):
-    """Split ``shape`` and add a centered-clearance lip/groove joint.
+    """Split ``shape`` and add a matched lip/groove joint.
 
     ``plane_normal`` defines the positive half.  If ``lip_on`` is
     ``"negative"``, the lip belongs to the negative half and projects in the
     positive-normal direction; ``"positive"`` reverses that arrangement.
 
-    With ``contour_mode="internal"``, the lip follows every nested closed
+    When ``contour_indices`` is supplied, only those indices returned by
+    :func:`analyze_section_contours` are used. Otherwise, with
+    ``contour_mode="internal"``, the lip follows every nested closed
     contour in the section. With ``contour_mode="outer"``, it follows each
     disconnected section region's outermost perimeter and ignores holes. The
-    groove is wider than the lip by ``clearance`` and deeper by
-    ``vertical_clearance``.
+    groove is wider on the material side by ``clearance`` and deeper by
+    ``vertical_clearance``. The lip volume is intersected with ("stolen"
+    from) the receiving half so existing holes, slopes, and local details are
+    retained instead of being covered by a uniform prism.
     """
 
     if shape is None or shape.isNull() or not shape.Solids:
@@ -457,13 +517,27 @@ def make_enclosure(
 
     origin = App.Vector(plane_origin)
     normal = _unit(plane_normal)
-    plane_face = _make_plane_face(shape, origin, normal)
-    section = shape.common(plane_face)
-    if not section.Faces or section.Area <= tolerance * tolerance:
-        raise ValueError("The split plane does not cross a solid wall section.")
-
-    wires = _joint_wires(section, tolerance, contour_mode)
+    section, plane_face, contours = analyze_section_contours(
+        shape, origin, normal, tolerance
+    )
+    if contour_indices is None:
+        wires = [
+            contour.wire
+            for contour in contours
+            if contour.kind == contour_mode
+        ]
+    else:
+        indices = []
+        for value in contour_indices:
+            index = int(value)
+            if index not in indices:
+                indices.append(index)
+        if any(index < 0 or index >= len(contours) for index in indices):
+            raise ValueError("A selected contour index is no longer available.")
+        wires = [contours[index].wire for index in indices]
     if not wires:
+        if contour_indices is not None:
+            raise ValueError("Select at least one contour for the joint.")
         if contour_mode == "internal":
             raise ValueError(
                 "No internal closed section contours were found. "
@@ -479,7 +553,14 @@ def make_enclosure(
     )
 
     direction = normal if lip_on == "negative" else -normal
-    lip_volume = _extrude_faces(lip_footprint, direction * lip_height)
+    raw_lip_volume = _extrude_faces(lip_footprint, direction * lip_height)
+    receiving_half = positive if lip_on == "negative" else negative
+    lip_volume = raw_lip_volume.common(receiving_half)
+    if lip_volume.isNull() or not lip_volume.Solids:
+        raise RuntimeError(
+            "The receiving half contains no material inside the requested lip region."
+        )
+    lip_volume = _safe_refine(lip_volume)
 
     # Start the cutting tool just behind the split plane to avoid a Boolean
     # failure caused by a merely coincident starting face.

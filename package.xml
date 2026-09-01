@@ -3,10 +3,13 @@
     <name>Split2Enclosure</name>
     <description>Split hollow solids and add matched lip-and-groove enclosure joints.</description>
     <icon>Resources/icons/split2enclosure.svg</icon>
-    <version>0.1.0</version>
+    <version>0.2.0</version>
     <date>2026-09-01</date>
     <maintainer>Split2Enclosure contributors</maintainer>
-    <license>LGPL-2.1-or-later</license>
+    <license file="LICENSE">MIT</license>
+    <url type="repository" branch="main">https://github.com/fredriknk/split2enclosure</url>
+    <url type="bugtracker">https://github.com/fredriknk/split2enclosure/issues</url>
+    <url type="readme">https://github.com/fredriknk/split2enclosure/blob/main/README.md</url>
     <content>
         <workbench>
             <name>Split2Enclosure</name>
@@ -18,4 +21,3 @@
         </macro>
     </content>
 </package>
-
