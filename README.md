@@ -14,7 +14,7 @@ to work on a single model and then split it into two parts for 3D printing.
 
 Split2Enclosure takes a solid like this and:
 
-- splits it using a global plane, planar face, datum plane, or open sketch;
+- splits it using a global plane, planar face, datum plane;
 - detects the resulting joint contours automatically;
 - lets you interactively include or exclude individual contours;
 - generates a lip on either half;
@@ -46,7 +46,7 @@ Split2Enclosure takes a solid like this and:
 ## Quick start
 
 1. Select the solid you want to split.
-2. Optionally Ctrl-select a planar face, datum plane, or open sketch to use as
+2. Optionally Ctrl-select a planar face, datum plane, to use as
    the split reference.
 3. Open the **Split2Enclosure** workbench.
 4. Click **Split to enclosure**.
