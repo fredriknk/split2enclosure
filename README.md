@@ -1,21 +1,77 @@
 # Split2Enclosure
 
-Split2Enclosure is a FreeCAD 1.1 workbench that turns a solid into two
-printable enclosure halves with a matched lip and groove.
+**Turn an existing FreeCAD solid into two printable enclosure halves with an
+automatically generated lip-and-groove joint.**
 
-Features:
+Split2Enclosure is a FreeCAD workbench for splitting complex solids into
+enclosure halves while preserving the geometry around the joint — including
+holes, bosses, curved walls, slopes and other local features.
 
-- splits a solid on global XY, XZ, or YZ, with a signed offset;
-- accepts a selected planar face or Part Design datum plane as the reference;
-- accepts a connected open line-segment sketch and extrudes it into a ruled
-  cutting surface through the enclosure;
-- previews every closed seam contour directly in the 3D view;
-- lets contours be included or excluded using checkboxes or by clicking their
-  green/red preview wires;
-- adds a lip to either half and cuts a wider/deeper groove into the other;
-- takes the lip geometry from the receiving half, preserving holes, slopes,
-  and details that change immediately after the split plane;
-- leaves the source untouched and creates two static `Part::Feature` results.
+![Split2Enclosure interface](media/Interface.png)
+
+## What it does
+
+Split2Enclosure takes a solid like this and:
+
+- splits it using a global plane, planar face, datum plane, or open sketch;
+- detects the resulting joint contours automatically;
+- lets you interactively include or exclude individual contours;
+- generates a lip on either half;
+- cuts a matching groove with configurable side and depth clearance;
+- preserves existing geometry around the split;
+- produces two ready-to-export solid parts.
+
+### Result
+
+<table>
+<tr>
+<td width="50%">
+
+**Top half**
+
+<img src="media/Split_part_top.png" width="100%">
+
+</td>
+<td width="50%">
+
+**Bottom half**
+
+<img src="media/Split_part_bottom.png" width="100%">
+
+</td>
+</tr>
+</table>
+
+## Quick start
+
+1. Select the solid you want to split.
+2. Optionally Ctrl-select a planar face, datum plane, or open sketch to use as
+   the split reference.
+3. Open the **Split2Enclosure** workbench.
+4. Click **Split to enclosure**.
+5. Choose the split plane and press **Preview / choose contours**.
+6. Click contours in the 3D view or use the checkboxes to choose where the
+   joint should be generated.
+7. Set lip dimensions and clearances.
+8. Press **Create**.
+
+The original solid is left untouched. Split2Enclosure creates two new
+`Part::Feature` solids inside an App Part.
+
+## Joint parameters
+
+| Parameter | Description |
+|---|---|
+| **Lip belongs to** | Chooses which resulting half receives the lip |
+| **Lip width** | Width of the tongue measured into the wall |
+| **Lip height** | Height of the tongue across the split |
+| **Side clearance** | Additional lateral clearance in the mating groove |
+| **Depth clearance** | Additional clearance beyond the end of the lip |
+
+Green preview contours are **included** in the joint.  
+Red preview contours are **excluded**.
+
+![Contour selection](media/Interface.png)
 
 ## Install
 
