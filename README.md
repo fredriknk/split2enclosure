@@ -191,17 +191,6 @@ derived directly from the final solid.
   contour. Segmented snaps or multiple independently positioned ribs are not
   yet supported.
 
-## Completed TODOs in v0.4.0
-
-- [x] Apply depth clearance at the groove tip without recessing the lip root.
-- [x] Add optional draft angle to lip and groove.
-- [x] Harden sketch splits against missing panels and Boolean debris.
-- [x] Assign every profile independently to negative, positive, or off.
-- [x] Shift/Ctrl-select several profiles and assign them together.
-- [x] Visualize lip extrusion direction with colored arrows.
-- [x] Add configurable per-profile snap retention.
-- [x] Load user-editable defaults from the add-on directory.
-
 ## v0.4.1 corrections
 
 - Sketch seams use one global extrusion axis instead of changing direction at
