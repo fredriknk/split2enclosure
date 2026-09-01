@@ -44,21 +44,35 @@ def run_check():
             QtWidgets.QMessageBox.warning = original_warning
 
         assert dialog.contour_list.count() == 3
-        checked = sum(
-            dialog.contour_list.item(row).checkState() == QtCore.Qt.Checked
+        negative = sum(
+            str(dialog.contour_list.item(row).data(QtCore.Qt.UserRole + 1))
+            == "negative"
             for row in range(dialog.contour_list.count())
         )
-        assert checked == 1
-        assert len(dialog._preview_objects) == 3
+        assert negative == 1
+        assert len(dialog._preview_objects) == 6
 
         preview_name = next(iter(dialog._preview_objects))
         preview_index = dialog._preview_objects[preview_name]
         item = dialog._item_for_index(preview_index)
-        previous_state = item.checkState()
+        previous_side = str(item.data(QtCore.Qt.UserRole + 1))
         Gui.Selection.addSelection(doc.getObject(preview_name))
-        assert item.checkState() != previous_state
+        assert str(item.data(QtCore.Qt.UserRole + 1)) != previous_side
 
-        dialog.reject()
+        dialog.contour_list.clearSelection()
+        dialog.contour_list.item(0).setSelected(True)
+        dialog.contour_list.item(1).setSelected(True)
+        dialog._set_selected_side("positive")
+        assert all(
+            str(dialog.contour_list.item(row).data(QtCore.Qt.UserRole + 1))
+            == "positive"
+            for row in (0, 1)
+        )
+
+        dialog.accept()
+        assignments = dialog.parameters()["contour_sides"]
+        assert assignments[0] == "positive"
+        assert assignments[1] == "positive"
         assert doc.getObject("Split2EnclosurePreview") is None
 
         sketch = doc.addObject("Sketcher::SketchObject", "SplitPath")
@@ -95,7 +109,7 @@ def run_check():
             QtWidgets.QMessageBox.warning = original_warning
         assert sketch_dialog.contour_list.count() >= 2
         assert sketch_dialog.parameters()["split_kind"] == "sketch"
-        assert len(sketch_dialog._preview_objects) == sketch_dialog.contour_list.count()
+        assert len(sketch_dialog._preview_objects) == 2 * sketch_dialog.contour_list.count()
         sketch_dialog.reject()
         assert doc.getObject("Split2EnclosurePreview") is None
 

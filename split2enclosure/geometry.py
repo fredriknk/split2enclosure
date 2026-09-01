@@ -632,6 +632,35 @@ def _same_geometric_edge(first, second, tolerance):
     )
 
 
+def ruled_contour_positive_direction(
+    split,
+    wire,
+    tolerance=DEFAULT_TOLERANCE,
+):
+    """Return the local ruled-surface direction toward the positive half."""
+
+    tolerance = max(float(tolerance), DEFAULT_TOLERANCE)
+    for section_face in split.section.Faces:
+        if not any(
+            _same_geometric_edge(face_edge, wire_edge, tolerance)
+            for face_edge in section_face.Edges
+            for wire_edge in wire.Edges
+        ):
+            continue
+        surface_face = _matching_surface_face(section_face, split.surface, tolerance)
+        point = section_face.CenterOfMass
+        normal = _surface_normal_at_face(surface_face, point)
+        epsilon = max(split.section.BoundBox.DiagonalLength * 1e-6, tolerance * 10)
+        if split.positive.isInside(point + normal * epsilon, tolerance, True):
+            return normal
+        if split.positive.isInside(point - normal * epsilon, tolerance, True):
+            return -normal
+        if (split.positive.CenterOfMass - point).dot(normal) < 0:
+            normal = -normal
+        return normal
+    raise ValueError("Could not determine the local direction for this contour.")
+
+
 def _contour_groups(
     contours,
     contour_sides,

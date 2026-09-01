@@ -5,7 +5,7 @@ import os
 import FreeCAD as App
 import FreeCADGui as Gui
 import Part
-from PySide import QtCore, QtWidgets
+from PySide import QtCore, QtGui, QtWidgets
 
 from .geometry import (
     analyze_section_contours,
@@ -13,6 +13,7 @@ from .geometry import (
     make_enclosure,
     make_enclosure_with_sketch,
     plane_from_axes,
+    ruled_contour_positive_direction,
 )
 
 
@@ -88,6 +89,9 @@ class EnclosureDialog(QtWidgets.QDialog):
         self._selection_observer_active = False
         self._updating_checks = False
         self._selected_contour_indices = None
+        self._contour_sides = None
+        self._preview_split = None
+        self._preview_positive_directions = {}
         self._source_view_state = None
         self.setWindowTitle("Split to enclosure")
         self.setMinimumWidth(480)
@@ -119,39 +123,47 @@ class EnclosureDialog(QtWidgets.QDialog):
         self.lip_side = QtWidgets.QComboBox()
         self.lip_side.addItem("Negative half", "negative")
         self.lip_side.addItem("Positive half", "positive")
-        form.addRow("Lip belongs to", self.lip_side)
+        form.addRow("Default contour side", self.lip_side)
 
         self.lip_width = self._length_box(0.01, 1000.0, 1.0)
         self.lip_height = self._length_box(0.01, 1000.0, 2.0)
         self.clearance = self._length_box(0.0, 100.0, 0.2)
         self.vertical_clearance = self._length_box(0.0, 100.0, 0.2)
+        self.draft_angle = self._angle_box(0.0, 30.0, 0.0)
         form.addRow("Lip width", self.lip_width)
         form.addRow("Lip height", self.lip_height)
         form.addRow("Side clearance", self.clearance)
         form.addRow("Depth clearance", self.vertical_clearance)
+        form.addRow("Draft angle", self.draft_angle)
 
         contour_group = QtWidgets.QGroupBox("Joint contours")
         contour_layout = QtWidgets.QVBoxLayout(contour_group)
         contour_buttons = QtWidgets.QHBoxLayout()
         self.preview_button = QtWidgets.QPushButton("Preview / choose contours")
-        self.select_all_button = QtWidgets.QPushButton("All")
-        self.select_none_button = QtWidgets.QPushButton("None")
+        self.set_negative_button = QtWidgets.QPushButton("NEG")
+        self.select_none_button = QtWidgets.QPushButton("OFF")
+        self.set_positive_button = QtWidgets.QPushButton("POS")
         contour_buttons.addWidget(self.preview_button)
         contour_buttons.addStretch(1)
-        contour_buttons.addWidget(self.select_all_button)
+        contour_buttons.addWidget(self.set_negative_button)
         contour_buttons.addWidget(self.select_none_button)
+        contour_buttons.addWidget(self.set_positive_button)
         contour_layout.addLayout(contour_buttons)
 
         self.contour_list = QtWidgets.QListWidget()
         self.contour_list.setMinimumHeight(125)
+        self.contour_list.setSelectionMode(
+            QtWidgets.QAbstractItemView.ExtendedSelection
+        )
         self.contour_list.setToolTip(
-            "Check contours here, or click their green/red preview wires in the 3D view"
+            "Shift/Ctrl-select rows, then assign NEG, OFF, or POS. "
+            "Clicking a 3D contour cycles its assignment."
         )
         contour_layout.addWidget(self.contour_list)
         legend = QtWidgets.QLabel(
-            "<span style='color:#20c050'>Green = included</span> &nbsp; "
-            "<span style='color:#e04040'>Red = excluded</span>. "
-            "Outermost contours are selected initially."
+            "<span style='color:#3595ff'>Blue = NEG lip, arrow toward POS</span> &nbsp; "
+            "<span style='color:#f0a03a'>Orange = POS lip, arrow toward NEG</span> &nbsp; "
+            "<span style='color:#999'>Gray = OFF</span>."
         )
         legend.setTextFormat(QtCore.Qt.RichText)
         legend.setWordWrap(True)
@@ -175,9 +187,15 @@ class EnclosureDialog(QtWidgets.QDialog):
         layout.addWidget(buttons)
 
         self.preview_button.clicked.connect(self._build_preview)
-        self.select_all_button.clicked.connect(lambda: self._set_all_checked(True))
-        self.select_none_button.clicked.connect(lambda: self._set_all_checked(False))
-        self.contour_list.itemChanged.connect(self._item_changed)
+        self.set_negative_button.clicked.connect(
+            lambda: self._set_selected_side("negative")
+        )
+        self.select_none_button.clicked.connect(
+            lambda: self._set_selected_side("none")
+        )
+        self.set_positive_button.clicked.connect(
+            lambda: self._set_selected_side("positive")
+        )
         self.plane_mode.currentIndexChanged.connect(self._invalidate_preview)
         self.plane_mode.currentIndexChanged.connect(self._update_split_controls)
         self.offset.valueChanged.connect(self._invalidate_preview)
@@ -191,6 +209,16 @@ class EnclosureDialog(QtWidgets.QDialog):
         box.setValue(value)
         box.setSuffix(" mm")
         box.setSingleStep(0.1)
+        return box
+
+    @staticmethod
+    def _angle_box(minimum, maximum, value):
+        box = QtWidgets.QDoubleSpinBox()
+        box.setDecimals(2)
+        box.setRange(minimum, maximum)
+        box.setValue(value)
+        box.setSuffix(" deg")
+        box.setSingleStep(0.5)
         return box
 
     def _plane_parameters(self):
@@ -229,9 +257,11 @@ class EnclosureDialog(QtWidgets.QDialog):
             "lip_height": self.lip_height.value(),
             "clearance": self.clearance.value(),
             "vertical_clearance": self.vertical_clearance.value(),
+            "draft_angle": self.draft_angle.value(),
             "lip_on": self.lip_side.currentData(),
             "contour_mode": "outer",
             "contour_indices": self._selected_contour_indices,
+            "contour_sides": self._contour_sides,
             "plane_mode": mode,
             "offset": offset,
             "split_kind": "sketch" if mode == "Selected open sketch" else "plane",
@@ -244,7 +274,7 @@ class EnclosureDialog(QtWidgets.QDialog):
         try:
             mode, _offset, origin, normal = self._plane_parameters()
             if mode == "Selected open sketch":
-                _split, self._contours = analyze_sketch_contours(
+                self._preview_split, self._contours = analyze_sketch_contours(
                     self.source.Shape,
                     self.split_sketch.Shape,
                     normal,
@@ -253,6 +283,7 @@ class EnclosureDialog(QtWidgets.QDialog):
                 _section, _plane, self._contours = analyze_section_contours(
                     self.source.Shape, origin, normal
                 )
+                self._preview_split = None
             if not self._contours:
                 raise ValueError("No closed contours were found on this split plane.")
 
@@ -272,9 +303,13 @@ class EnclosureDialog(QtWidgets.QDialog):
 
             self._updating_checks = True
             for contour in self._contours:
-                included = contour.kind == "outer"
+                side = (
+                    self.lip_side.currentData()
+                    if contour.kind == "outer"
+                    else "none"
+                )
                 item = QtWidgets.QListWidgetItem(
-                    "#{:02d}  {:8s}   area {:9.2f} mm²   length {:9.2f} mm".format(
+                    "#{:02d}  {:8s}   area {:9.2f} mm2   length {:9.2f} mm".format(
                         contour.index + 1,
                         contour.kind,
                         contour.area,
@@ -283,14 +318,11 @@ class EnclosureDialog(QtWidgets.QDialog):
                 )
                 item.setFlags(
                     item.flags()
-                    | QtCore.Qt.ItemIsUserCheckable
                     | QtCore.Qt.ItemIsEnabled
                     | QtCore.Qt.ItemIsSelectable
                 )
                 item.setData(QtCore.Qt.UserRole, contour.index)
-                item.setCheckState(
-                    QtCore.Qt.Checked if included else QtCore.Qt.Unchecked
-                )
+                item.setData(QtCore.Qt.UserRole + 1, side)
                 self.contour_list.addItem(item)
 
                 preview = doc.addObject("Part::Feature", "Split2EnclosureContour")
@@ -305,7 +337,27 @@ class EnclosureDialog(QtWidgets.QDialog):
                 preview.ViewObject.Selectable = True
                 self._preview_group.addObject(preview)
                 self._preview_objects[preview.Name] = contour.index
-                self._set_preview_color(contour.index, included)
+                positive_direction = (
+                    ruled_contour_positive_direction(
+                        self._preview_split, contour.wire
+                    )
+                    if self._preview_split is not None
+                    else App.Vector(normal)
+                )
+                self._preview_positive_directions[contour.index] = positive_direction
+
+                arrow = doc.addObject("Part::Feature", "Split2EnclosureDirection")
+                arrow.Label = "Contour #{:02d} lip direction".format(
+                    contour.index + 1
+                )
+                arrow.addProperty("App::PropertyInteger", "ContourIndex")
+                arrow.addProperty("App::PropertyString", "PreviewKind")
+                arrow.ContourIndex = contour.index
+                arrow.PreviewKind = "arrow"
+                arrow.ViewObject.Selectable = True
+                self._preview_group.addObject(arrow)
+                self._preview_objects[arrow.Name] = contour.index
+                self._set_contour_side(contour.index, side)
             self._updating_checks = False
             doc.recompute()
             if hasattr(Gui, "Selection"):
@@ -318,15 +370,48 @@ class EnclosureDialog(QtWidgets.QDialog):
                 self, "Contour preview", str(exc)
             )
 
-    def _set_preview_color(self, index, included):
+    @staticmethod
+    def _side_color(side):
+        return {
+            "negative": (0.20, 0.58, 1.00),
+            "positive": (0.95, 0.55, 0.18),
+            "none": (0.55, 0.55, 0.55),
+        }[side]
+
+    def _arrow_shape(self, index, side):
+        if side == "none":
+            return Part.Shape()
+        contour = self._contours[index]
+        direction = App.Vector(self._preview_positive_directions[index])
+        if side == "positive":
+            direction = -direction
+        direction.normalize()
+        length = max(self.lip_height.value() * 2.0, 3.0)
+        radius = max(length * 0.045, 0.12)
+        point = contour.wire.CenterOfMass
+        shaft = Part.makeCylinder(radius, length * 0.68, point, direction)
+        head = Part.makeCone(
+            radius * 2.2,
+            0.0,
+            length * 0.32,
+            point + direction * (length * 0.68),
+            direction,
+        )
+        return Part.makeCompound([shaft, head])
+
+    def _set_preview_style(self, index, side):
+        color = self._side_color(side)
         for name, mapped_index in self._preview_objects.items():
             if mapped_index != index:
                 continue
             obj = self.source.Document.getObject(name)
             if obj is not None:
-                color = (0.15, 0.90, 0.25) if included else (0.95, 0.20, 0.20)
                 obj.ViewObject.LineColor = color
                 obj.ViewObject.PointColor = color
+                obj.ViewObject.ShapeColor = color
+                if hasattr(obj, "PreviewKind") and obj.PreviewKind == "arrow":
+                    obj.Shape = self._arrow_shape(index, side)
+                    obj.ViewObject.Visibility = side != "none"
 
     def _item_for_index(self, index):
         for row in range(self.contour_list.count()):
@@ -335,16 +420,25 @@ class EnclosureDialog(QtWidgets.QDialog):
                 return item
         return None
 
-    def _item_changed(self, item):
-        if self._updating_checks:
+    def _set_contour_side(self, index, side):
+        item = self._item_for_index(index)
+        if item is None:
             return
-        index = int(item.data(QtCore.Qt.UserRole))
-        self._set_preview_color(index, item.checkState() == QtCore.Qt.Checked)
+        item.setData(QtCore.Qt.UserRole + 1, side)
+        labels = {"negative": "NEG", "positive": "POS", "none": "OFF"}
+        base = item.text()
+        if base.startswith("[") and "] " in base:
+            base = base.split("] ", 1)[1]
+        item.setText("[{}] {}".format(labels[side], base))
+        item.setForeground(QtGui.QColor.fromRgbF(*self._side_color(side)))
+        self._set_preview_style(index, side)
 
-    def _set_all_checked(self, included):
-        state = QtCore.Qt.Checked if included else QtCore.Qt.Unchecked
-        for row in range(self.contour_list.count()):
-            self.contour_list.item(row).setCheckState(state)
+    def _set_selected_side(self, side):
+        items = self.contour_list.selectedItems()
+        if not items and self.contour_list.currentItem() is not None:
+            items = [self.contour_list.currentItem()]
+        for item in items:
+            self._set_contour_side(int(item.data(QtCore.Qt.UserRole)), side)
 
     def addSelection(self, document_name, object_name, _sub_name, _point):
         if document_name != self.source.Document.Name:
@@ -354,11 +448,14 @@ class EnclosureDialog(QtWidgets.QDialog):
             return
         item = self._item_for_index(index)
         if item is not None:
-            item.setCheckState(
-                QtCore.Qt.Unchecked
-                if item.checkState() == QtCore.Qt.Checked
-                else QtCore.Qt.Checked
-            )
+            current = str(item.data(QtCore.Qt.UserRole + 1))
+            next_side = {
+                "none": "negative",
+                "negative": "positive",
+                "positive": "none",
+            }[current]
+            self.contour_list.setCurrentItem(item)
+            self._set_contour_side(index, next_side)
         if hasattr(Gui, "Selection"):
             Gui.Selection.clearSelection()
 
@@ -381,6 +478,8 @@ class EnclosureDialog(QtWidgets.QDialog):
             self._preview_objects.clear()
             self._preview_group = None
             self._source_view_state = None
+            self._preview_split = None
+            self._preview_positive_directions.clear()
             return
         for name in list(self._preview_objects):
             if doc.getObject(name) is not None:
@@ -401,21 +500,28 @@ class EnclosureDialog(QtWidgets.QDialog):
             self._updating_checks = False
             self._contours = []
             self._selected_contour_indices = None
+            self._contour_sides = None
+            self._preview_split = None
+            self._preview_positive_directions.clear()
         doc.recompute()
 
     def accept(self):
         if self._contours:
-            selected = []
+            contour_sides = {}
             for row in range(self.contour_list.count()):
                 item = self.contour_list.item(row)
-                if item.checkState() == QtCore.Qt.Checked:
-                    selected.append(int(item.data(QtCore.Qt.UserRole)))
-            if not selected:
+                contour_sides[int(item.data(QtCore.Qt.UserRole))] = str(
+                    item.data(QtCore.Qt.UserRole + 1)
+                )
+            if not any(side != "none" for side in contour_sides.values()):
                 QtWidgets.QMessageBox.warning(
-                    self, "Split to enclosure", "Select at least one joint contour."
+                    self,
+                    "Split to enclosure",
+                    "Assign at least one contour to NEG or POS.",
                 )
                 return
-            self._selected_contour_indices = selected
+            self._selected_contour_indices = None
+            self._contour_sides = contour_sides
         self._cleanup_preview(clear_list=False)
         super().accept()
 
@@ -444,9 +550,11 @@ def _add_result_to_document(source, result, parameters):
         container.addProperty("App::PropertyLength", "LipHeight", "Joint parameters")
         container.addProperty("App::PropertyLength", "SideClearance", "Joint parameters")
         container.addProperty("App::PropertyLength", "DepthClearance", "Joint parameters")
+        container.addProperty("App::PropertyAngle", "DraftAngle", "Joint parameters")
         container.addProperty("App::PropertyString", "LipSide", "Joint parameters")
         container.addProperty("App::PropertyString", "ContourMode", "Joint parameters")
         container.addProperty("App::PropertyString", "ContourSelection", "Joint parameters")
+        container.addProperty("App::PropertyString", "ContourAssignments", "Joint parameters")
         container.addProperty("App::PropertyInteger", "JointContours", "Diagnostics")
 
         container.Source = source
@@ -459,14 +567,28 @@ def _add_result_to_document(source, result, parameters):
         container.LipHeight = parameters["lip_height"]
         container.SideClearance = parameters["clearance"]
         container.DepthClearance = parameters["vertical_clearance"]
-        container.LipSide = parameters["lip_on"]
+        container.DraftAngle = parameters["draft_angle"]
+        assignments = parameters.get("contour_sides") or {}
+        active_sides = {side for side in assignments.values() if side != "none"}
+        if not active_sides:
+            active_sides = {parameters["lip_on"]}
+        container.LipSide = (
+            next(iter(active_sides)) if len(active_sides) == 1 else "mixed"
+        )
         container.ContourMode = (
-            "selected"
-            if parameters.get("contour_indices") is not None
-            else parameters["contour_mode"]
+            "per-contour" if assignments else parameters["contour_mode"]
         )
         container.ContourSelection = ",".join(
-            str(index + 1) for index in (parameters.get("contour_indices") or [])
+            str(index + 1)
+            for index, side in sorted(assignments.items())
+            if side != "none"
+        ) or ",".join(
+            str(index + 1)
+            for index in (parameters.get("contour_indices") or [])
+        )
+        container.ContourAssignments = ", ".join(
+            "{}:{}".format(index + 1, side)
+            for index, side in sorted(assignments.items())
         )
         container.JointContours = len(result.internal_wires)
 
@@ -478,8 +600,16 @@ def _add_result_to_document(source, result, parameters):
         positive.Shape = result.positive
         negative.addProperty("App::PropertyString", "Joint", "Split2Enclosure")
         positive.addProperty("App::PropertyString", "Joint", "Split2Enclosure")
-        negative.Joint = "Lip" if parameters["lip_on"] == "negative" else "Groove"
-        positive.Joint = "Lip" if parameters["lip_on"] == "positive" else "Groove"
+        negative.Joint = (
+            "Lip and groove"
+            if len(active_sides) > 1
+            else "Lip" if "negative" in active_sides else "Groove"
+        )
+        positive.Joint = (
+            "Lip and groove"
+            if len(active_sides) > 1
+            else "Lip" if "positive" in active_sides else "Groove"
+        )
         negative.ViewObject.ShapeColor = (0.30, 0.65, 0.95)
         positive.ViewObject.ShapeColor = (0.95, 0.65, 0.25)
         container.addObject(negative)

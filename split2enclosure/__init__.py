@@ -9,6 +9,7 @@ from .geometry import (
     make_enclosure,
     make_enclosure_with_sketch,
     plane_from_axes,
+    ruled_contour_positive_direction,
     split_with_sketch,
 )
 
@@ -21,5 +22,6 @@ __all__ = [
     "make_enclosure",
     "make_enclosure_with_sketch",
     "plane_from_axes",
+    "ruled_contour_positive_direction",
     "split_with_sketch",
 ]
