@@ -12,8 +12,8 @@ DEFAULTS = {
     "depth_clearance": 0.2,
     "draft_angle": 0.0,
     "default_lip_side": "negative",
-    "snap_radius": 0.6,
-    "snap_clearance": 0.15,
+    "snap_radius": 0.2,
+    "snap_clearance": 0.05,
     "snap_position": 0.7,
 }
 

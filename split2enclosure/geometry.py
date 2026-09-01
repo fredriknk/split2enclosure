@@ -171,6 +171,23 @@ def _cut_tool_solids(shape, tool):
     return _safe_refine(result)
 
 
+def _fuse_tool_solids(shape, tool):
+    """Fuse compound tools one solid at a time and retain solid topology."""
+
+    if tool is None or tool.isNull():
+        return shape
+    result = shape
+    solids = sorted(tool.Solids, key=lambda solid: solid.Volume, reverse=True)
+    if not solids:
+        raise ValueError("The feature to fuse does not contain a solid.")
+    for solid in solids:
+        fused = result.fuse(solid)
+        if fused.isNull() or not fused.Solids:
+            raise RuntimeError("OpenCASCADE could not fuse a snap seam into the lip.")
+        result = fused
+    return _safe_refine(result)
+
+
 def _safe_refine(shape):
     """Remove redundant split edges when OCC can do so safely.
 
@@ -763,65 +780,61 @@ def _normalized_snap_assignments(contours, contour_snaps):
     }
 
 
-def _wire_point_and_tangent(wire):
-    points = wire.discretize(Number=37)
-    if len(points) < 3:
-        raise ValueError("The contour is too short for a snap feature.")
-    index = max(1, min(len(points) - 2, len(points) // 3))
-    tangent = points[index + 1] - points[index - 1]
-    tangent.normalize()
-    return points[index], tangent
+def _joint_slice(section, shape, direction, start, height):
+    """Extract an axial band from a globally extruded joint shape."""
 
-
-def _point_in_section(section, point, tolerance):
-    return any(face.isInside(point, tolerance * 100, True) for face in section.Faces)
+    surface = section.copy()
+    surface.translate(_unit(direction) * start)
+    footprint = shape.common(surface)
+    if footprint.isNull() or not footprint.Faces:
+        return Part.Shape()
+    return _extrude_faces(footprint, _unit(direction) * height).common(shape)
 
 
 def _snap_for_contour(
     section,
-    wire,
-    positive_direction,
-    lip_on,
-    lip_width,
+    stem_lip,
+    wide_lip,
+    wide_groove,
+    extrusion_direction,
     lip_height,
     snap_radius,
     snap_clearance,
     snap_position,
-    receiver,
-    lip,
     tolerance,
 ):
-    point, tangent = _wire_point_and_tangent(wire)
-    positive_direction = _unit(positive_direction)
-    extrusion_direction = (
-        positive_direction if lip_on == "negative" else -positive_direction
-    )
-    material_direction = positive_direction.cross(tangent)
-    if material_direction.Length <= tolerance:
-        material_direction = tangent.cross(positive_direction)
-    material_direction.normalize()
-    probe = max(lip_width * 0.35, tolerance * 100)
-    if not _point_in_section(
-        section, point + material_direction * probe, tolerance
-    ):
-        material_direction = -material_direction
-
-    center = (
-        point
-        + material_direction * (lip_width * 0.5)
-        + extrusion_direction * (lip_height * snap_position)
-    )
-    sphere = Part.makeSphere(snap_radius, center)
-    bump = _safe_refine(sphere.common(receiver))
-    if bump.isNull() or not bump.Solids:
-        raise ValueError("The snap nub does not intersect receiving-half material.")
-    attachment = bump.common(lip)
-    if attachment.isNull() or attachment.Volume <= tolerance ** 3:
+    direction = _unit(extrusion_direction)
+    available_height = lip_height * min(snap_position, 1.0 - snap_position)
+    if snap_radius >= available_height - tolerance:
         raise ValueError(
-            "The snap nub does not attach to the lip. Increase snap radius or lip width."
+            "Snap radius is too large for its height on the lip. Reduce the "
+            "radius or move the snap height fraction toward 0.5."
         )
-    pocket = Part.makeSphere(snap_radius + snap_clearance, center)
-    return bump, pocket
+
+    center = lip_height * snap_position
+    start = center - snap_radius
+    height = snap_radius * 2.0
+    rib = _joint_slice(section, wide_lip, direction, start, height)
+    if rib.isNull() or not rib.Solids:
+        raise ValueError("Could not construct a continuous snap seam on the lip.")
+    added = rib.cut(stem_lip)
+    if added.isNull() or added.Volume <= max(tolerance ** 3 * 1000, 1e-9):
+        raise ValueError(
+            "No continuous snap seam fits this lip perimeter. Reduce snap size."
+        )
+
+    channel_start = max(0.0, start - snap_clearance)
+    channel_end = min(lip_height, start + height + snap_clearance)
+    channel = _joint_slice(
+        section,
+        wide_groove,
+        direction,
+        channel_start,
+        channel_end - channel_start,
+    )
+    if channel.isNull() or not channel.Solids:
+        raise ValueError("Could not construct the matching snap channel.")
+    return rib, channel, added
 
 
 def _ruled_joint_volumes(
@@ -962,6 +975,8 @@ def make_enclosure_with_sketch(
         contours, contour_sides, contour_indices, lip_on, contour_mode
     )
     snap_assignments = _normalized_snap_assignments(contours, contour_snaps)
+    if any(snap_assignments.values()) and lip_width - 2.0 * snap_radius <= tolerance:
+        raise ValueError("Snap bead diameter must be smaller than the lip width.")
     joint_positive_direction = ruled_contour_positive_direction(
         split, contours[0].wire, tolerance
     )
@@ -970,14 +985,62 @@ def make_enclosure_with_sketch(
     lips = []
     grooves = []
     root_clearances = []
-    side_lips = {}
     for side in ("negative", "positive"):
-        wires = groups[side]
-        if not wires:
+        for snapped in (False, True):
+            wires = [
+                contour.wire
+                for contour in contours
+                if assignments[contour.index] == side
+                and snap_assignments[contour.index] == snapped
+            ]
+            if not wires:
+                continue
+            effective_width = lip_width - 2.0 * snap_radius if snapped else lip_width
+            lip, groove, root_clearance = _ruled_joint_volumes(
+                split,
+                wires,
+                effective_width,
+                lip_height,
+                clearance,
+                vertical_clearance,
+                draft_angle,
+                side,
+                joint_positive_direction,
+                tolerance,
+            )
+            lips.append(lip)
+            grooves.append(groove)
+            if root_clearance is not None and not root_clearance.isNull():
+                root_clearances.append(root_clearance)
+            if side == "negative":
+                negative = _safe_refine(negative.fuse(lip))
+                positive = _cut_tool_solids(positive, groove)
+                positive = _safe_refine(positive.cut(lip))
+            else:
+                positive = _safe_refine(positive.fuse(lip))
+                negative = _cut_tool_solids(negative, groove)
+                negative = _safe_refine(negative.cut(lip))
+
+    snap_features = []
+    for contour in contours:
+        side = assignments[contour.index]
+        if side == "none" or not snap_assignments[contour.index]:
             continue
-        lip, groove, root_clearance = _ruled_joint_volumes(
+        contour_lip, _unused_groove, _unused_root = _ruled_joint_volumes(
             split,
-            wires,
+            [contour.wire],
+            lip_width - 2.0 * snap_radius,
+            lip_height,
+            clearance,
+            vertical_clearance,
+            draft_angle,
+            side,
+            joint_positive_direction,
+            tolerance,
+        )
+        wide_lip, _unused_groove, _unused_root = _ruled_joint_volumes(
+            split,
+            [contour.wire],
             lip_width,
             lip_height,
             clearance,
@@ -987,50 +1050,41 @@ def make_enclosure_with_sketch(
             joint_positive_direction,
             tolerance,
         )
-        lips.append(lip)
-        side_lips[side] = lip
-        grooves.append(groove)
-        if root_clearance is not None and not root_clearance.isNull():
-            root_clearances.append(root_clearance)
-        if side == "negative":
-            if root_clearance is not None and not root_clearance.isNull():
-                negative = _cut_tool_solids(negative, root_clearance)
-            negative = _safe_refine(negative.fuse(lip))
-            positive = _cut_tool_solids(positive, groove)
-            positive = _safe_refine(positive.cut(lip))
-        else:
-            if root_clearance is not None and not root_clearance.isNull():
-                positive = _cut_tool_solids(positive, root_clearance)
-            positive = _safe_refine(positive.fuse(lip))
-            negative = _cut_tool_solids(negative, groove)
-            negative = _safe_refine(negative.cut(lip))
-
-    snap_features = []
-    for contour in contours:
-        side = assignments[contour.index]
-        if side == "none" or not snap_assignments[contour.index]:
-            continue
-        receiver = split.positive if side == "negative" else split.negative
-        bump, pocket = _snap_for_contour(
-            split.section,
-            contour.wire,
-            joint_positive_direction,
+        _unused_lip, wide_groove, _unused_root = _ruled_joint_volumes(
+            split,
+            [contour.wire],
+            lip_width + snap_clearance,
+            lip_height,
+            clearance,
+            vertical_clearance,
+            draft_angle,
             side,
-            lip_width,
+            joint_positive_direction,
+            tolerance,
+        )
+        extrusion_direction = (
+            joint_positive_direction
+            if side == "negative"
+            else -joint_positive_direction
+        )
+        bump, pocket, added = _snap_for_contour(
+            split.section,
+            contour_lip,
+            wide_lip,
+            wide_groove,
+            extrusion_direction,
             lip_height,
             snap_radius,
             snap_clearance,
             snap_position,
-            receiver,
-            side_lips[side],
             tolerance,
         )
-        snap_features.append(bump)
+        snap_features.append(added)
         if side == "negative":
-            negative = _safe_refine(negative.fuse(bump))
+            negative = _fuse_tool_solids(negative, bump)
             positive = _safe_refine(positive.cut(pocket).cut(bump))
         else:
-            positive = _safe_refine(positive.fuse(bump))
+            positive = _fuse_tool_solids(positive, bump)
             negative = _safe_refine(negative.cut(pocket).cut(bump))
     negative = _discard_boolean_slivers(negative, tolerance, keep_largest=True)
     positive = _discard_boolean_slivers(positive, tolerance, keep_largest=True)
@@ -1566,6 +1620,8 @@ def make_enclosure(
         contours, contour_sides, contour_indices, lip_on, contour_mode
     )
     snap_assignments = _normalized_snap_assignments(contours, contour_snaps)
+    if any(snap_assignments.values()) and lip_width - 2.0 * snap_radius <= tolerance:
+        raise ValueError("Snap bead diameter must be smaller than the lip width.")
 
     negative, positive = _split_sides(
         shape, plane_face, origin, normal, tolerance
@@ -1575,14 +1631,66 @@ def make_enclosure(
     lips = []
     grooves = []
     root_clearances = []
-    side_lips = {}
     for side in ("negative", "positive"):
-        wires = groups[side]
-        if not wires:
+        for snapped in (False, True):
+            wires = [
+                contour.wire
+                for contour in contours
+                if assignments[contour.index] == side
+                and snap_assignments[contour.index] == snapped
+            ]
+            if not wires:
+                continue
+            effective_width = lip_width - 2.0 * snap_radius if snapped else lip_width
+            lip, groove, root_clearance = _plane_joint_volumes(
+                section,
+                wires,
+                base_negative,
+                base_positive,
+                normal,
+                effective_width,
+                lip_height,
+                clearance,
+                vertical_clearance,
+                draft_angle,
+                side,
+                tolerance,
+            )
+            lips.append(lip)
+            grooves.append(groove)
+            if not root_clearance.isNull():
+                root_clearances.append(root_clearance)
+            if side == "negative":
+                negative = _safe_refine(negative.fuse(lip))
+                positive = _cut_tool_solids(positive, groove)
+                positive = _safe_refine(positive.cut(lip))
+            else:
+                positive = _safe_refine(positive.fuse(lip))
+                negative = _cut_tool_solids(negative, groove)
+                negative = _safe_refine(negative.cut(lip))
+
+    snap_features = []
+    for contour in contours:
+        side = assignments[contour.index]
+        if side == "none" or not snap_assignments[contour.index]:
             continue
-        lip, groove, root_clearance = _plane_joint_volumes(
+        contour_lip, _unused_groove, _unused_root = _plane_joint_volumes(
             section,
-            wires,
+            [contour.wire],
+            base_negative,
+            base_positive,
+            normal,
+            lip_width - 2.0 * snap_radius,
+            lip_height,
+            clearance,
+            vertical_clearance,
+            draft_angle,
+            side,
+            tolerance,
+        )
+        wide_lip, _unused_groove, _unused_root = _plane_joint_volumes(
+            section,
+            [contour.wire],
             base_negative,
             base_positive,
             normal,
@@ -1594,50 +1702,39 @@ def make_enclosure(
             side,
             tolerance,
         )
-        lips.append(lip)
-        side_lips[side] = lip
-        grooves.append(groove)
-        if not root_clearance.isNull():
-            root_clearances.append(root_clearance)
-        if side == "negative":
-            if not root_clearance.isNull():
-                negative = _cut_tool_solids(negative, root_clearance)
-            negative = _safe_refine(negative.fuse(lip))
-            positive = _cut_tool_solids(positive, groove)
-            positive = _safe_refine(positive.cut(lip))
-        else:
-            if not root_clearance.isNull():
-                positive = _cut_tool_solids(positive, root_clearance)
-            positive = _safe_refine(positive.fuse(lip))
-            negative = _cut_tool_solids(negative, groove)
-            negative = _safe_refine(negative.cut(lip))
-
-    snap_features = []
-    for contour in contours:
-        side = assignments[contour.index]
-        if side == "none" or not snap_assignments[contour.index]:
-            continue
-        receiver = base_positive if side == "negative" else base_negative
-        bump, pocket = _snap_for_contour(
+        _unused_lip, wide_groove, _unused_root = _plane_joint_volumes(
             section,
-            contour.wire,
+            [contour.wire],
+            base_negative,
+            base_positive,
             normal,
+            lip_width + snap_clearance,
+            lip_height,
+            clearance,
+            vertical_clearance,
+            draft_angle,
             side,
-            lip_width,
+            tolerance,
+        )
+        extrusion_direction = normal if side == "negative" else -normal
+        bump, pocket, added = _snap_for_contour(
+            section,
+            contour_lip,
+            wide_lip,
+            wide_groove,
+            extrusion_direction,
             lip_height,
             snap_radius,
             snap_clearance,
             snap_position,
-            receiver,
-            side_lips[side],
             tolerance,
         )
-        snap_features.append(bump)
+        snap_features.append(added)
         if side == "negative":
-            negative = _safe_refine(negative.fuse(bump))
+            negative = _fuse_tool_solids(negative, bump)
             positive = _safe_refine(positive.cut(pocket).cut(bump))
         else:
-            positive = _safe_refine(positive.fuse(bump))
+            positive = _fuse_tool_solids(positive, bump)
             negative = _safe_refine(negative.cut(pocket).cut(bump))
 
     if not negative.isValid() or not positive.isValid():

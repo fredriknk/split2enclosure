@@ -308,7 +308,7 @@ class GeometryTests(unittest.TestCase):
         self.assertEqual(result.contour_sides[1], "positive")
         self.assertGreater(result.lip.Volume, 0.0)
 
-    def test_per_contour_snap_nub_has_matching_clearance_pocket(self):
+    def test_per_contour_snap_bead_has_matching_clearance_channel(self):
         source = hollow_box(open_top=False)
         origin, normal = plane_from_axes("XY", 10)
         result = make_enclosure(
@@ -321,12 +321,14 @@ class GeometryTests(unittest.TestCase):
             vertical_clearance=0.2,
             contour_sides={0: "negative"},
             contour_snaps={0: True},
-            snap_radius=0.65,
-            snap_clearance=0.15,
+            snap_radius=0.2,
+            snap_clearance=0.1,
             snap_position=0.7,
         )
         self.assertTrue(result.contour_snaps[0])
         self.assertGreater(result.snap_features.Volume, 0.0)
+        self.assertGreater(result.snap_features.BoundBox.XLength, 20.0)
+        self.assertGreater(result.snap_features.BoundBox.YLength, 15.0)
         self.assertTrue(result.negative.isValid())
         self.assertTrue(result.positive.isValid())
         try:
@@ -336,7 +338,7 @@ class GeometryTests(unittest.TestCase):
             overlap_volume = 0.0
         self.assertLess(overlap_volume, 1e-6)
 
-    def test_snap_nub_works_on_sketch_seam(self):
+    def test_snap_bead_works_on_sketch_seam(self):
         outer = Part.makeBox(40, 30, 20, App.Vector(-20, -15, -10))
         inner = Part.makeBox(36, 26, 16, App.Vector(-18, -13, -8))
         source = outer.cut(inner)
@@ -351,10 +353,11 @@ class GeometryTests(unittest.TestCase):
             lip_height=1.5,
             contour_sides={0: "negative"},
             contour_snaps={0: True},
-            snap_radius=0.65,
-            snap_clearance=0.15,
+            snap_radius=0.2,
+            snap_clearance=0.1,
         )
         self.assertGreater(result.snap_features.Volume, 0.0)
+        self.assertGreater(result.snap_features.BoundBox.DiagonalLength, 15.0)
         self.assertEqual(len(result.negative.Solids), 1)
         self.assertEqual(len(result.positive.Solids), 1)
 
