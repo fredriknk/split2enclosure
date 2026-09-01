@@ -1,6 +1,9 @@
 import os
+import json
 import sys
+import tempfile
 import unittest
+import warnings
 from unittest import mock
 
 import FreeCAD as App
@@ -19,6 +22,7 @@ from split2enclosure.geometry import (
     plane_from_axes,
     split_with_sketch,
 )
+from split2enclosure.config import DEFAULTS, load_defaults
 
 
 def hollow_box(open_top=True):
@@ -29,6 +33,24 @@ def hollow_box(open_top=True):
 
 
 class GeometryTests(unittest.TestCase):
+    def test_user_config_merges_valid_defaults_and_rejects_bad_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "defaults.json")
+            with open(path, "w", encoding="utf-8") as stream:
+                json.dump({"lip_width": 1.75, "default_lip_side": "positive"}, stream)
+            loaded = load_defaults(path)
+            self.assertEqual(loaded["lip_width"], 1.75)
+            self.assertEqual(loaded["default_lip_side"], "positive")
+            self.assertEqual(loaded["lip_height"], DEFAULTS["lip_height"])
+
+            with open(path, "w", encoding="utf-8") as stream:
+                json.dump({"snap_position": 2.0}, stream)
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                loaded = load_defaults(path)
+            self.assertEqual(loaded, DEFAULTS)
+            self.assertTrue(caught)
+
     def test_open_sketch_ruled_surface_splits_into_two_valid_solids(self):
         source = Part.makeBox(40, 30, 20, App.Vector(-20, -15, -10))
         path = Part.makePolygon(

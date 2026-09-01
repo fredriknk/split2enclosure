@@ -68,11 +68,19 @@ def run_check():
             == "positive"
             for row in (0, 1)
         )
+        dialog._toggle_selected_snap()
+        assert all(
+            bool(dialog.contour_list.item(row).data(QtCore.Qt.UserRole + 2))
+            for row in (0, 1)
+        )
 
         dialog.accept()
         assignments = dialog.parameters()["contour_sides"]
+        snaps = dialog.parameters()["contour_snaps"]
         assert assignments[0] == "positive"
         assert assignments[1] == "positive"
+        assert snaps[0]
+        assert snaps[1]
         assert doc.getObject("Split2EnclosurePreview") is None
 
         sketch = doc.addObject("Sketcher::SketchObject", "SplitPath")

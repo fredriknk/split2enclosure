@@ -21,6 +21,10 @@ dialog = EnclosureDialog(source, None)
 parameters = dialog.parameters()
 assert parameters["plane_mode"] == "Global XY"
 assert parameters["contour_mode"] == "outer"
+assert parameters["snap_radius"] > 0
+assert parameters["snap_clearance"] >= 0
+assert 0.1 <= parameters["snap_position"] <= 0.9
+assert parameters["contour_snaps"] is None
 dialog.close()
 
 sketch = document.addObject("Part::Feature", "SplitSketch")

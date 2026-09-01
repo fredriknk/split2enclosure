@@ -7,6 +7,7 @@ import FreeCADGui as Gui
 import Part
 from PySide import QtCore, QtGui, QtWidgets
 
+from .config import load_defaults
 from .geometry import (
     analyze_section_contours,
     analyze_sketch_contours,
@@ -90,9 +91,11 @@ class EnclosureDialog(QtWidgets.QDialog):
         self._updating_checks = False
         self._selected_contour_indices = None
         self._contour_sides = None
+        self._contour_snaps = None
         self._preview_split = None
         self._preview_positive_directions = {}
         self._source_view_state = None
+        self.defaults = load_defaults()
         self.setWindowTitle("Split to enclosure")
         self.setMinimumWidth(480)
 
@@ -123,18 +126,42 @@ class EnclosureDialog(QtWidgets.QDialog):
         self.lip_side = QtWidgets.QComboBox()
         self.lip_side.addItem("Negative half", "negative")
         self.lip_side.addItem("Positive half", "positive")
+        default_side = self.lip_side.findData(self.defaults["default_lip_side"])
+        self.lip_side.setCurrentIndex(max(default_side, 0))
         form.addRow("Default contour side", self.lip_side)
 
-        self.lip_width = self._length_box(0.01, 1000.0, 1.0)
-        self.lip_height = self._length_box(0.01, 1000.0, 2.0)
-        self.clearance = self._length_box(0.0, 100.0, 0.2)
-        self.vertical_clearance = self._length_box(0.0, 100.0, 0.2)
-        self.draft_angle = self._angle_box(0.0, 30.0, 0.0)
+        self.lip_width = self._length_box(
+            0.01, 1000.0, self.defaults["lip_width"]
+        )
+        self.lip_height = self._length_box(
+            0.01, 1000.0, self.defaults["lip_height"]
+        )
+        self.clearance = self._length_box(
+            0.0, 100.0, self.defaults["side_clearance"]
+        )
+        self.vertical_clearance = self._length_box(
+            0.0, 100.0, self.defaults["depth_clearance"]
+        )
+        self.draft_angle = self._angle_box(
+            0.0, 30.0, self.defaults["draft_angle"]
+        )
+        self.snap_radius = self._length_box(
+            0.01, 100.0, self.defaults["snap_radius"]
+        )
+        self.snap_clearance = self._length_box(
+            0.0, 100.0, self.defaults["snap_clearance"]
+        )
+        self.snap_position = self._number_box(
+            0.1, 0.9, self.defaults["snap_position"], 2, 0.05
+        )
         form.addRow("Lip width", self.lip_width)
         form.addRow("Lip height", self.lip_height)
         form.addRow("Side clearance", self.clearance)
         form.addRow("Depth clearance", self.vertical_clearance)
         form.addRow("Draft angle", self.draft_angle)
+        form.addRow("Snap radius", self.snap_radius)
+        form.addRow("Snap clearance", self.snap_clearance)
+        form.addRow("Snap height fraction", self.snap_position)
 
         contour_group = QtWidgets.QGroupBox("Joint contours")
         contour_layout = QtWidgets.QVBoxLayout(contour_group)
@@ -143,11 +170,13 @@ class EnclosureDialog(QtWidgets.QDialog):
         self.set_negative_button = QtWidgets.QPushButton("NEG")
         self.select_none_button = QtWidgets.QPushButton("OFF")
         self.set_positive_button = QtWidgets.QPushButton("POS")
+        self.toggle_snap_button = QtWidgets.QPushButton("SNAP")
         contour_buttons.addWidget(self.preview_button)
         contour_buttons.addStretch(1)
         contour_buttons.addWidget(self.set_negative_button)
         contour_buttons.addWidget(self.select_none_button)
         contour_buttons.addWidget(self.set_positive_button)
+        contour_buttons.addWidget(self.toggle_snap_button)
         contour_layout.addLayout(contour_buttons)
 
         self.contour_list = QtWidgets.QListWidget()
@@ -157,7 +186,8 @@ class EnclosureDialog(QtWidgets.QDialog):
         )
         self.contour_list.setToolTip(
             "Shift/Ctrl-select rows, then assign NEG, OFF, or POS. "
-            "Clicking a 3D contour cycles its assignment."
+            "SNAP toggles retention for every selected row. Clicking a 3D "
+            "contour cycles its side assignment."
         )
         contour_layout.addWidget(self.contour_list)
         legend = QtWidgets.QLabel(
@@ -196,6 +226,7 @@ class EnclosureDialog(QtWidgets.QDialog):
         self.set_positive_button.clicked.connect(
             lambda: self._set_selected_side("positive")
         )
+        self.toggle_snap_button.clicked.connect(self._toggle_selected_snap)
         self.plane_mode.currentIndexChanged.connect(self._invalidate_preview)
         self.plane_mode.currentIndexChanged.connect(self._update_split_controls)
         self.offset.valueChanged.connect(self._invalidate_preview)
@@ -219,6 +250,15 @@ class EnclosureDialog(QtWidgets.QDialog):
         box.setValue(value)
         box.setSuffix(" deg")
         box.setSingleStep(0.5)
+        return box
+
+    @staticmethod
+    def _number_box(minimum, maximum, value, decimals, step):
+        box = QtWidgets.QDoubleSpinBox()
+        box.setDecimals(decimals)
+        box.setRange(minimum, maximum)
+        box.setValue(value)
+        box.setSingleStep(step)
         return box
 
     def _plane_parameters(self):
@@ -258,10 +298,14 @@ class EnclosureDialog(QtWidgets.QDialog):
             "clearance": self.clearance.value(),
             "vertical_clearance": self.vertical_clearance.value(),
             "draft_angle": self.draft_angle.value(),
+            "snap_radius": self.snap_radius.value(),
+            "snap_clearance": self.snap_clearance.value(),
+            "snap_position": self.snap_position.value(),
             "lip_on": self.lip_side.currentData(),
             "contour_mode": "outer",
             "contour_indices": self._selected_contour_indices,
             "contour_sides": self._contour_sides,
+            "contour_snaps": self._contour_snaps,
             "plane_mode": mode,
             "offset": offset,
             "split_kind": "sketch" if mode == "Selected open sketch" else "plane",
@@ -308,7 +352,7 @@ class EnclosureDialog(QtWidgets.QDialog):
                     if contour.kind == "outer"
                     else "none"
                 )
-                item = QtWidgets.QListWidgetItem(
+                base_label = (
                     "#{:02d}  {:8s}   area {:9.2f} mm2   length {:9.2f} mm".format(
                         contour.index + 1,
                         contour.kind,
@@ -316,6 +360,7 @@ class EnclosureDialog(QtWidgets.QDialog):
                         contour.length,
                     )
                 )
+                item = QtWidgets.QListWidgetItem(base_label)
                 item.setFlags(
                     item.flags()
                     | QtCore.Qt.ItemIsEnabled
@@ -323,6 +368,8 @@ class EnclosureDialog(QtWidgets.QDialog):
                 )
                 item.setData(QtCore.Qt.UserRole, contour.index)
                 item.setData(QtCore.Qt.UserRole + 1, side)
+                item.setData(QtCore.Qt.UserRole + 2, False)
+                item.setData(QtCore.Qt.UserRole + 3, base_label)
                 self.contour_list.addItem(item)
 
                 preview = doc.addObject("Part::Feature", "Split2EnclosureContour")
@@ -425,13 +472,17 @@ class EnclosureDialog(QtWidgets.QDialog):
         if item is None:
             return
         item.setData(QtCore.Qt.UserRole + 1, side)
-        labels = {"negative": "NEG", "positive": "POS", "none": "OFF"}
-        base = item.text()
-        if base.startswith("[") and "] " in base:
-            base = base.split("] ", 1)[1]
-        item.setText("[{}] {}".format(labels[side], base))
+        self._refresh_item_text(item)
         item.setForeground(QtGui.QColor.fromRgbF(*self._side_color(side)))
         self._set_preview_style(index, side)
+
+    @staticmethod
+    def _refresh_item_text(item):
+        labels = {"negative": "NEG", "positive": "POS", "none": "OFF"}
+        side = str(item.data(QtCore.Qt.UserRole + 1))
+        snap = "SNAP" if bool(item.data(QtCore.Qt.UserRole + 2)) else "----"
+        base = str(item.data(QtCore.Qt.UserRole + 3))
+        item.setText("[{}][{}] {}".format(labels[side], snap, base))
 
     def _set_selected_side(self, side):
         items = self.contour_list.selectedItems()
@@ -439,6 +490,17 @@ class EnclosureDialog(QtWidgets.QDialog):
             items = [self.contour_list.currentItem()]
         for item in items:
             self._set_contour_side(int(item.data(QtCore.Qt.UserRole)), side)
+
+    def _toggle_selected_snap(self):
+        items = self.contour_list.selectedItems()
+        if not items and self.contour_list.currentItem() is not None:
+            items = [self.contour_list.currentItem()]
+        for item in items:
+            item.setData(
+                QtCore.Qt.UserRole + 2,
+                not bool(item.data(QtCore.Qt.UserRole + 2)),
+            )
+            self._refresh_item_text(item)
 
     def addSelection(self, document_name, object_name, _sub_name, _point):
         if document_name != self.source.Document.Name:
@@ -501,6 +563,7 @@ class EnclosureDialog(QtWidgets.QDialog):
             self._contours = []
             self._selected_contour_indices = None
             self._contour_sides = None
+            self._contour_snaps = None
             self._preview_split = None
             self._preview_positive_directions.clear()
         doc.recompute()
@@ -508,11 +571,14 @@ class EnclosureDialog(QtWidgets.QDialog):
     def accept(self):
         if self._contours:
             contour_sides = {}
+            contour_snaps = {}
             for row in range(self.contour_list.count()):
                 item = self.contour_list.item(row)
-                contour_sides[int(item.data(QtCore.Qt.UserRole))] = str(
+                index = int(item.data(QtCore.Qt.UserRole))
+                contour_sides[index] = str(
                     item.data(QtCore.Qt.UserRole + 1)
                 )
+                contour_snaps[index] = bool(item.data(QtCore.Qt.UserRole + 2))
             if not any(side != "none" for side in contour_sides.values()):
                 QtWidgets.QMessageBox.warning(
                     self,
@@ -522,6 +588,7 @@ class EnclosureDialog(QtWidgets.QDialog):
                 return
             self._selected_contour_indices = None
             self._contour_sides = contour_sides
+            self._contour_snaps = contour_snaps
         self._cleanup_preview(clear_list=False)
         super().accept()
 
@@ -551,6 +618,10 @@ def _add_result_to_document(source, result, parameters):
         container.addProperty("App::PropertyLength", "SideClearance", "Joint parameters")
         container.addProperty("App::PropertyLength", "DepthClearance", "Joint parameters")
         container.addProperty("App::PropertyAngle", "DraftAngle", "Joint parameters")
+        container.addProperty("App::PropertyLength", "SnapRadius", "Snap parameters")
+        container.addProperty("App::PropertyLength", "SnapClearance", "Snap parameters")
+        container.addProperty("App::PropertyFloat", "SnapPosition", "Snap parameters")
+        container.addProperty("App::PropertyString", "SnapContours", "Snap parameters")
         container.addProperty("App::PropertyString", "LipSide", "Joint parameters")
         container.addProperty("App::PropertyString", "ContourMode", "Joint parameters")
         container.addProperty("App::PropertyString", "ContourSelection", "Joint parameters")
@@ -568,7 +639,16 @@ def _add_result_to_document(source, result, parameters):
         container.SideClearance = parameters["clearance"]
         container.DepthClearance = parameters["vertical_clearance"]
         container.DraftAngle = parameters["draft_angle"]
+        container.SnapRadius = parameters["snap_radius"]
+        container.SnapClearance = parameters["snap_clearance"]
+        container.SnapPosition = parameters["snap_position"]
         assignments = parameters.get("contour_sides") or {}
+        snap_assignments = parameters.get("contour_snaps") or {}
+        container.SnapContours = ",".join(
+            str(index + 1)
+            for index, enabled in sorted(snap_assignments.items())
+            if enabled and assignments.get(index, "none") != "none"
+        )
         active_sides = {side for side in assignments.values() if side != "none"}
         if not active_sides:
             active_sides = {parameters["lip_on"]}
