@@ -162,7 +162,7 @@ derived directly from the final solid.
 ## TODO
 - [ ] Fix lip clearance on both top and bottom half ceiling and roof, now it only adds clearance to the receiving half.
 - [ ] Add optional draft angle to lip and groove.
-- [ ] Add better support for sketch splits, it works now but barely 
+- [ ] Add better support for sketch splits, it works now but its very flakym, often failing with error "The receiving half contains no material for the sketch-seam lip", or only producing a single lip on one side. 
 - [ ] Add support for up and down lips! So each profile gives me the option to be negative or positive, it could have two boxes, one for up and one for down, and the user can select which one to use. But we must implement it in a way we can only select one. maby a radio button? pos/neg/none
 - [ ] It should be possible to shift select multiple profiles and set them all to up or down, instead of having to select each one individually.
 - [ ] Add visualization for profiles which way they will extrude lips
