@@ -144,12 +144,12 @@ For an open-sketch split, the engine extrudes the sketch along its support-plane
 normal beyond the model bounds. OpenCASCADE partitions the body with the
 resulting ruled surface. Connected boundary edges are unfolded into
 sketch-path-distance coordinates for outer/internal contour classification.
-The engine fits one signed joint direction that crosses every ruled panel and
-uses it for the complete lip, groove, and preview arrows. A straight sketch
-uses its exact surface normal; a polyline uses the bisector of its limiting
-panel normals. This avoids the distortion caused by forcing a diagonal seam
-onto a global axis while still keeping polyline corners continuous. Coplanar
-section fragments created by OpenCASCADE are buffered as one region so their
+The engine selects one signed global X, Y, or Z assembly axis that crosses
+every ruled panel and uses it for the complete lip, groove, shoulder relief,
+snap channel, and preview arrows. The sketch controls where the case is cut,
+but does not tilt the direction in which the finished halves slide together.
+The most direct usable principal axis is chosen automatically. Coplanar section
+fragments created by OpenCASCADE are buffered as one region so their
 topological boundaries cannot introduce small breaks in the joint.
 
 The groove is cut with a widened/deepened band, and the lip-owning flat
@@ -188,8 +188,8 @@ derived directly from the final solid.
   B-splines are not yet supported.
 - A sketch split must divide the source into exactly two solids. Its endpoints
   should extend beyond the projected model boundary.
-- A sketch split must admit one consistent direction through every ruled panel;
-  paths that reverse or fold back on themselves cannot form a continuous joint.
+- A sketch split must be monotonic across at least one global X, Y, or Z axis
+  so the completed case can slide together along one principal direction.
 - Very thin walls, tight concave radii, or a lip wider than the available wall
   can make offsets fail. Reduce width/clearance or move the plane.
 - Results are static features. Change parameters by deleting the result group
@@ -197,6 +197,12 @@ derived directly from the final solid.
 - Snap retention creates one continuous 45-degree wedge/channel seam on each
   enabled contour. Segmented snaps or multiple independently positioned ribs
   are not yet supported.
+
+## v0.4.3 corrections
+
+- Sketch paths once again control only the split location. Lips, grooves,
+  shoulder reliefs, and snap channels use one global principal assembly axis,
+  including on straight diagonal sketches.
 
 ## v0.4.2 corrections
 

@@ -215,7 +215,7 @@ class GeometryTests(unittest.TestCase):
         )
         self.assertFalse(deepened.negative.isInside(shoulder_point, 1e-6, True))
 
-    def test_sketch_lips_use_one_fitted_direction(self):
+    def test_sketch_lips_use_one_principal_assembly_axis(self):
         source = hollow_box(open_top=False)
         path = Part.makePolygon(
             [
@@ -234,8 +234,7 @@ class GeometryTests(unittest.TestCase):
         ]
         self.assertTrue(directions)
         self.assertTrue(all(direction == directions[0] for direction in directions))
-        self.assertAlmostEqual(directions[0].Length, 1.0, places=9)
-        self.assertGreater(
+        self.assertEqual(
             sum(abs(component) > 1e-9 for component in directions[0]), 1
         )
         result = make_enclosure_with_sketch(
@@ -250,7 +249,7 @@ class GeometryTests(unittest.TestCase):
         )
         self.assert_valid_pair(source, result)
 
-    def test_splitbox_complex_diagonal_sketch_uses_continuous_matched_joint(self):
+    def test_splitbox_diagonal_sketch_uses_principal_axis_and_matched_volumes(self):
         path = os.path.join(PROJECT_ROOT, "examples", "Splitbox_test.FCStd")
         document = App.openDocument(path)
         try:
@@ -261,16 +260,7 @@ class GeometryTests(unittest.TestCase):
             )
             self.assertGreaterEqual(len(contours), 5)
             direction = ruled_contour_positive_direction(split, contours[0].wire)
-            surface_face = split.surface.Faces[0]
-            u_min, u_max, v_min, v_max = surface_face.ParameterRange
-            surface_normal = surface_face.normalAt(
-                (u_min + u_max) * 0.5,
-                (v_min + v_max) * 0.5,
-            )
-            surface_normal.normalize()
-            self.assertGreater(abs(direction.dot(surface_normal)), 0.999999)
-            self.assertGreater(abs(direction.x), 0.1)
-            self.assertGreater(abs(direction.y), 0.9)
+            self.assertEqual(direction, App.Vector(0, 1, 0))
 
             result = make_enclosure_with_sketch(
                 source,

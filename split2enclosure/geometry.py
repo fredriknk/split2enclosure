@@ -692,14 +692,13 @@ def ruled_contour_positive_direction(
     wire,
     tolerance=DEFAULT_TOLERANCE,
 ):
-    """Return one signed direction that crosses the whole ruled surface.
+    """Return one signed principal axis that crosses the whole ruled surface.
 
     A sketch seam used to extrude every ruled panel along its own normal. At a
     polyline corner those directions diverge, producing mitre wedges and gaps.
-    The joint instead uses the direction that maximizes its least-direct
-    crossing of all panels. A straight or coplanar seam therefore follows its
-    exact surface normal, while a polyline uses the bisector of its limiting
-    panel normals. Every panel and preview arrow shares that direction.
+    The joint instead uses one global X, Y, or Z direction so both halves have
+    a straight principal-axis assembly motion. Every lip, groove, shoulder
+    relief, snap channel, and preview arrow shares that direction.
     """
 
     del wire  # Kept in the public signature for backwards compatibility.
@@ -720,28 +719,26 @@ def ruled_contour_positive_direction(
             normal = -normal
         positive_normals.append(normal)
 
-    center_delta = split.positive.CenterOfMass - split.negative.CenterOfMass
-    raw_candidates = list(positive_normals)
-    normal_sum = App.Vector()
-    for normal in positive_normals:
-        normal_sum += normal
-    raw_candidates.append(normal_sum)
-    raw_candidates.append(center_delta)
-    for first_index, first in enumerate(positive_normals):
-        for second in positive_normals[first_index + 1:]:
-            raw_candidates.append(first + second)
-
     candidates = []
-    for raw_candidate in raw_candidates:
-        if raw_candidate.Length <= tolerance:
+    center_delta = split.positive.CenterOfMass - split.negative.CenterOfMass
+    for axis in (
+        App.Vector(1, 0, 0),
+        App.Vector(0, 1, 0),
+        App.Vector(0, 0, 1),
+    ):
+        dots = [normal.dot(axis) for normal in positive_normals]
+        if not dots or min(abs(value) for value in dots) <= 1e-4:
             continue
-        candidate = _unit(raw_candidate)
-        score = min(normal.dot(candidate) for normal in positive_normals)
-        candidates.append((score, candidate))
-    if not candidates or max(candidates, key=lambda item: item[0])[0] <= 1e-4:
+        if min(dots) < 0.0 < max(dots):
+            continue
+        directed = axis if sum(dots) > 0.0 else -axis
+        score = min(abs(value) for value in dots)
+        score += abs(center_delta.dot(axis)) * 1e-9
+        candidates.append((score, directed))
+    if not candidates:
         raise ValueError(
-            "The sketch seam cannot use one consistent extrusion direction. "
-            "Remove any reversal or overhang in the split path."
+            "The sketch seam cannot use one principal-axis assembly direction. "
+            "Make the split path monotonic across global X, Y, or Z."
         )
     return max(candidates, key=lambda item: item[0])[1]
 
