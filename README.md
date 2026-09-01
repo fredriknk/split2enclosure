@@ -166,6 +166,8 @@ derived directly from the final solid.
 - [ ] Add support for up and down lips! So each profile gives me the option to be negative or positive, it could have two boxes, one for up and one for down, and the user can select which one to use. But we must implement it in a way we can only select one. maby a radio button? pos/neg/none
 - [ ] It should be possible to shift select multiple profiles and set them all to up or down, instead of having to select each one individually.
 - [ ] Add visualization for profiles which way they will extrude lips
+- [ ] Add option to add parametric retention features to the lip and groove so that the two halves will snap together. This could be a checkbox on each profile.
+- [ ] Add a config file in the file location if possible, so that the user can set default values for lip width, height, clearances, etc. This way the user doesn't have to set them every time they use the workbench.
 
 ## Tests and sample
 
