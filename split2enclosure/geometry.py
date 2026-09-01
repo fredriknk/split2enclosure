@@ -202,6 +202,27 @@ def _open_sketch_wire(sketch_shape, tolerance=DEFAULT_TOLERANCE):
     return wire
 
 
+def _validate_simple_sketch_path(wire, sketch_normal, tolerance):
+    from shapely.geometry import LineString
+
+    points = wire.discretize(Deflection=0.05)
+    origin = points[0]
+    axis_u = points[1] - origin
+    axis_u.normalize()
+    axis_v = sketch_normal.cross(axis_u)
+    axis_v.normalize()
+    coordinates = []
+    for point in points:
+        relative = point - origin
+        if abs(relative.dot(sketch_normal)) > tolerance * 100:
+            raise ValueError("All split-sketch edges must lie on one plane.")
+        coordinate = (relative.dot(axis_u), relative.dot(axis_v))
+        if not coordinates or coordinate != coordinates[-1]:
+            coordinates.append(coordinate)
+    if len(coordinates) < 2 or not LineString(coordinates).is_simple:
+        raise ValueError("The split sketch must not cross or overlap itself.")
+
+
 def _surface_normal_at_face(face, point):
     try:
         u_value, v_value = face.Surface.parameter(point)
@@ -248,6 +269,7 @@ def split_with_sketch(
     tolerance = max(float(tolerance), DEFAULT_TOLERANCE)
     extrusion_normal = _unit(sketch_normal)
     sketch_wire = _open_sketch_wire(sketch_shape, tolerance)
+    _validate_simple_sketch_path(sketch_wire, extrusion_normal, tolerance)
 
     span = max(shape.BoundBox.DiagonalLength * 2.0, 10.0)
     surface_wire = sketch_wire.copy()

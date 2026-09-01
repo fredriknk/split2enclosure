@@ -20,7 +20,7 @@ def run_check():
             if name == "split2enclosure" or name.startswith("split2enclosure."):
                 del sys.modules[name]
         sys.path.insert(0, PROJECT_ROOT)
-        from split2enclosure.command import EnclosureDialog
+        from split2enclosure.command import EnclosureDialog, _selection_context
 
         doc = App.newDocument("Split2EnclosurePreviewCheck")
         outer = Part.makeBox(40, 30, 20)
@@ -72,6 +72,14 @@ def run_check():
             False,
         )
         doc.recompute()
+        Gui.Selection.clearSelection()
+        Gui.Selection.addSelection(source)
+        Gui.Selection.addSelection(sketch)
+        selected_source, selected_reference, selected_sketch = _selection_context()
+        assert selected_source == source
+        assert selected_reference is None
+        assert selected_sketch == sketch
+        Gui.Selection.clearSelection()
         sketch_dialog = EnclosureDialog(
             source,
             None,

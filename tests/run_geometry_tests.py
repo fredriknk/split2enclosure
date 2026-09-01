@@ -76,6 +76,17 @@ class GeometryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "one connected"):
             split_with_sketch(source, disconnected, App.Vector(0, 0, 1))
 
+        crossing = Part.makePolygon(
+            [
+                App.Vector(-1, 2, 0),
+                App.Vector(11, 8, 0),
+                App.Vector(-1, 8, 0),
+                App.Vector(11, 2, 0),
+            ]
+        )
+        with self.assertRaisesRegex(ValueError, "must not cross"):
+            split_with_sketch(source, crossing, App.Vector(0, 0, 1))
+
     def test_ruled_sketch_split_adds_valid_lip_and_groove(self):
         outer = Part.makeBox(40, 30, 20, App.Vector(-20, -15, -10))
         inner = Part.makeBox(36, 26, 16, App.Vector(-18, -13, -8))
