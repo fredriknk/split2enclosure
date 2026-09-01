@@ -3,9 +3,10 @@
 **Turn an existing FreeCAD solid into two printable enclosure halves with an
 automatically generated lip-and-groove joint.**
 
-Split2Enclosure is a FreeCAD workbench for splitting complex solids into
+Split2Enclosure is a FreeCAD 1.1 workbench for splitting complex solids into
 enclosure halves while preserving the geometry around the joint — including
-holes, bosses, curved walls, slopes and other local features.
+holes, bosses, curved walls, slopes and other local features. This allows you
+to work on a single model and then split it into two parts for 3D printing. 
 
 ![Split2Enclosure interface](media/Interface.png)
 
