@@ -6,6 +6,7 @@ workbench command.
 """
 
 from dataclasses import dataclass
+import math
 
 import FreeCAD as App
 import Part
@@ -137,7 +138,7 @@ def _fuse_shapes(shapes):
     return _safe_refine(result)
 
 
-def _discard_boolean_slivers(shape, tolerance):
+def _discard_boolean_slivers(shape, tolerance, keep_largest=False):
     """Drop zero-volume OCC artifacts while retaining real result solids."""
 
     if shape is None or shape.isNull():
@@ -146,10 +147,26 @@ def _discard_boolean_slivers(shape, tolerance):
     # microscopic wedge. Enclosure halves are required to stay connected, so
     # discard components below one thousandth of the result volume.
     threshold = max(abs(shape.Volume) * 1e-3, tolerance ** 3 * 1000, 1e-9)
+    if keep_largest and shape.Solids:
+        return max(shape.Solids, key=lambda solid: solid.Volume).copy()
     solids = [solid for solid in shape.Solids if solid.Volume > threshold]
     if not solids:
         return shape
     return _combine(solids)
+
+
+def _cut_tool_solids(shape, tool):
+    """Apply compound Boolean tools one solid at a time for OCC stability."""
+
+    if tool is None or tool.isNull():
+        return shape
+    result = shape
+    solids = sorted(tool.Solids, key=lambda solid: solid.Volume, reverse=True)
+    if not solids:
+        return result.cut(tool)
+    for solid in solids:
+        result = result.cut(solid)
+    return _safe_refine(result)
 
 
 def _safe_refine(shape):
@@ -678,6 +695,7 @@ def _ruled_joint_volumes(
     lip_height,
     clearance,
     vertical_clearance,
+    draft_angle,
     lip_on,
     tolerance,
 ):
@@ -707,24 +725,42 @@ def _ruled_joint_volumes(
         )
         if lip_band.isNull() or not lip_band.Faces:
             continue
+        draft_slope = math.tan(math.radians(draft_angle))
+        groove_depth = lip_height + vertical_clearance * 0.5
+        top_lip_width = lip_width - draft_slope * lip_height
+        top_groove_width = lip_width + clearance - draft_slope * groove_depth
+        if top_lip_width <= tolerance or top_groove_width <= tolerance:
+            raise ValueError(
+                "Draft angle is too large for the requested lip width and height."
+            )
+        top_lip_band = _edge_band_on_face(
+            section_face, boundary_edges, top_lip_width, tolerance
+        )
+        top_groove_band = _edge_band_on_face(
+            section_face, boundary_edges, top_groove_width, tolerance
+        )
         surface_face = _matching_surface_face(section_face, split.surface, tolerance)
         point = section_face.CenterOfMass
         normal = _surface_normal_at_face(surface_face, point)
         receiver = split.positive if lip_on == "negative" else split.negative
         candidates = []
         for candidate_direction in (normal, -normal):
-            candidate = _extrude_faces(
-                lip_band, candidate_direction * lip_height
+            candidate = _drafted_extrusion(
+                lip_band,
+                top_lip_band,
+                candidate_direction * lip_height,
+                draft_angle,
             ).common(receiver)
             volume = 0.0 if candidate.isNull() else candidate.Volume
             candidates.append((volume, candidate_direction, candidate))
         _volume, direction, lip_piece = max(candidates, key=lambda item: item[0])
         if lip_piece.isNull() or not lip_piece.Solids:
             continue
-        groove_piece = _extrude_faces(
+        groove_piece = _drafted_extrusion(
             groove_band,
-            direction
-            * (lip_height + vertical_clearance * 0.5 + tolerance * 2),
+            top_groove_band,
+            direction * (groove_depth + tolerance * 2),
+            draft_angle,
         )
         groove_piece.translate(-direction * tolerance)
         if vertical_clearance > tolerance:
@@ -765,6 +801,7 @@ def make_enclosure_with_sketch(
     lip_height=2.0,
     clearance=0.2,
     vertical_clearance=0.2,
+    draft_angle=0.0,
     lip_on="negative",
     contour_mode="outer",
     contour_indices=None,
@@ -777,11 +814,14 @@ def make_enclosure_with_sketch(
     lip_height = float(lip_height)
     clearance = float(clearance)
     vertical_clearance = float(vertical_clearance)
+    draft_angle = float(draft_angle)
     tolerance = max(float(tolerance), DEFAULT_TOLERANCE)
     if lip_width <= 0 or lip_height <= 0:
         raise ValueError("Lip width and height must be greater than zero.")
     if clearance < 0 or vertical_clearance < 0:
         raise ValueError("Clearances must not be negative.")
+    if draft_angle < 0 or draft_angle >= 45:
+        raise ValueError("Draft angle must be at least 0 and less than 45 degrees.")
     if lip_on not in ("negative", "positive"):
         raise ValueError("lip_on must be 'negative' or 'positive'.")
     if contour_mode not in ("outer", "internal"):
@@ -809,6 +849,7 @@ def make_enclosure_with_sketch(
             lip_height,
             clearance,
             vertical_clearance,
+            draft_angle,
             side,
             tolerance,
         )
@@ -818,16 +859,18 @@ def make_enclosure_with_sketch(
             root_clearances.append(root_clearance)
         if side == "negative":
             if root_clearance is not None and not root_clearance.isNull():
-                negative = negative.cut(root_clearance)
+                negative = _cut_tool_solids(negative, root_clearance)
             negative = _safe_refine(negative.fuse(lip))
-            positive = _safe_refine(positive.cut(groove).cut(lip))
+            positive = _cut_tool_solids(positive, groove)
+            positive = _safe_refine(positive.cut(lip))
         else:
             if root_clearance is not None and not root_clearance.isNull():
-                positive = positive.cut(root_clearance)
+                positive = _cut_tool_solids(positive, root_clearance)
             positive = _safe_refine(positive.fuse(lip))
-            negative = _safe_refine(negative.cut(groove).cut(lip))
-    negative = _discard_boolean_slivers(negative, tolerance)
-    positive = _discard_boolean_slivers(positive, tolerance)
+            negative = _cut_tool_solids(negative, groove)
+            negative = _safe_refine(negative.cut(lip))
+    negative = _discard_boolean_slivers(negative, tolerance, keep_largest=True)
+    positive = _discard_boolean_slivers(positive, tolerance, keep_largest=True)
     if not negative.isValid() or not positive.isValid():
         raise RuntimeError(
             "OpenCASCADE produced an invalid sketch-seam joint. Try smaller joint dimensions."
@@ -1168,6 +1211,68 @@ def _extrude_faces(shape, vector):
     return _safe_refine(result)
 
 
+def _inner_wires(face):
+    return [wire for wire in face.Wires if not wire.isSame(face.OuterWire)]
+
+
+def _nearest_shape(reference_point, shapes):
+    return min(shapes, key=lambda shape: (shape.CenterOfMass - reference_point).Length)
+
+
+def _drafted_extrusion(bottom, top, vector, draft_angle):
+    """Make a true lofted solid, preserving matching footprint holes."""
+
+    if draft_angle <= DEFAULT_TOLERANCE:
+        return _extrude_faces(bottom, vector)
+    translated_top = top.copy()
+    translated_top.translate(vector)
+    if len(bottom.Faces) != len(translated_top.Faces):
+        raise ValueError("Draft changed the joint footprint topology.")
+
+    available_top_faces = list(translated_top.Faces)
+    solids = []
+    for bottom_face in bottom.Faces:
+        expected_center = bottom_face.CenterOfMass + vector
+        top_face = _nearest_shape(expected_center, available_top_faces)
+        available_top_faces.remove(top_face)
+        try:
+            solid = Part.makeLoft(
+                [bottom_face.OuterWire, top_face.OuterWire],
+                True,
+                True,
+            )
+            bottom_holes = _inner_wires(bottom_face)
+            top_holes = _inner_wires(top_face)
+            if len(bottom_holes) != len(top_holes):
+                raise ValueError("Draft changed the joint footprint hole topology.")
+            available_top_holes = list(top_holes)
+            for bottom_hole in bottom_holes:
+                expected_hole_center = bottom_hole.CenterOfMass + vector
+                top_hole = _nearest_shape(expected_hole_center, available_top_holes)
+                available_top_holes.remove(top_hole)
+                hole_solid = Part.makeLoft(
+                    [bottom_hole, top_hole],
+                    True,
+                    True,
+                )
+                solid = solid.cut(hole_solid)
+        except (Part.OCCError, RuntimeError, ValueError) as exc:
+            # Some heavily trimmed BRep panels have incompatible edge splits
+            # after offsetting even though their areas correspond. Preserve a
+            # valid joint on that local panel and draft every compatible panel.
+            App.Console.PrintWarning(
+                "Split2Enclosure: draft skipped on one complex panel ({})\n".format(
+                    exc
+                )
+            )
+            solid = bottom_face.extrude(vector)
+        if not solid.isNull() and solid.Solids:
+            solids.extend(solid.Solids)
+    if not solids:
+        raise ValueError("Could not construct the drafted joint solid.")
+    return _fuse_shapes(solids)
+
+
 def _plane_joint_volumes(
     section,
     wires,
@@ -1178,6 +1283,7 @@ def _plane_joint_volumes(
     lip_height,
     clearance,
     vertical_clearance,
+    draft_angle,
     lip_on,
     tolerance,
 ):
@@ -1186,7 +1292,26 @@ def _plane_joint_volumes(
     )
     direction = normal if lip_on == "negative" else -normal
     receiver = positive_half if lip_on == "negative" else negative_half
-    raw_lip = _extrude_faces(lip_footprint, direction * lip_height)
+    draft_slope = math.tan(math.radians(draft_angle))
+    groove_depth = lip_height + vertical_clearance * 0.5
+    top_lip_width = lip_width - draft_slope * lip_height
+    top_groove_lip_width = lip_width - draft_slope * groove_depth
+    if top_lip_width <= tolerance or top_groove_lip_width + clearance <= tolerance:
+        raise ValueError(
+            "Draft angle is too large for the requested lip width and height."
+        )
+    top_lip_footprint, _unused = _joint_footprints(
+        section, wires, top_lip_width, clearance, tolerance
+    )
+    _unused, top_groove_footprint = _joint_footprints(
+        section, wires, top_groove_lip_width, clearance, tolerance
+    )
+    raw_lip = _drafted_extrusion(
+        lip_footprint,
+        top_lip_footprint,
+        direction * lip_height,
+        draft_angle,
+    )
     lip = _safe_refine(raw_lip.common(receiver))
     if lip.isNull() or not lip.Solids:
         raise RuntimeError(
@@ -1194,9 +1319,11 @@ def _plane_joint_volumes(
         )
 
     tip_clearance = vertical_clearance * 0.5
-    groove = _extrude_faces(
+    groove = _drafted_extrusion(
         groove_footprint,
+        top_groove_footprint,
         direction * (lip_height + tip_clearance + tolerance * 2),
+        draft_angle,
     )
     groove.translate(-direction * tolerance)
 
@@ -1220,6 +1347,7 @@ def make_enclosure(
     lip_height=2.0,
     clearance=0.2,
     vertical_clearance=0.2,
+    draft_angle=0.0,
     lip_on="negative",
     contour_mode="internal",
     contour_indices=None,
@@ -1251,11 +1379,14 @@ def make_enclosure(
     lip_height = float(lip_height)
     clearance = float(clearance)
     vertical_clearance = float(vertical_clearance)
+    draft_angle = float(draft_angle)
     tolerance = max(float(tolerance), DEFAULT_TOLERANCE)
     if lip_width <= 0 or lip_height <= 0:
         raise ValueError("Lip width and height must be greater than zero.")
     if clearance < 0 or vertical_clearance < 0:
         raise ValueError("Clearances must not be negative.")
+    if draft_angle < 0 or draft_angle >= 45:
+        raise ValueError("Draft angle must be at least 0 and less than 45 degrees.")
     if lip_on not in ("negative", "positive"):
         raise ValueError("lip_on must be 'negative' or 'positive'.")
     if contour_mode not in ("outer", "internal"):
@@ -1292,6 +1423,7 @@ def make_enclosure(
             lip_height,
             clearance,
             vertical_clearance,
+            draft_angle,
             side,
             tolerance,
         )
@@ -1301,14 +1433,16 @@ def make_enclosure(
             root_clearances.append(root_clearance)
         if side == "negative":
             if not root_clearance.isNull():
-                negative = negative.cut(root_clearance)
+                negative = _cut_tool_solids(negative, root_clearance)
             negative = _safe_refine(negative.fuse(lip))
-            positive = _safe_refine(positive.cut(groove).cut(lip))
+            positive = _cut_tool_solids(positive, groove)
+            positive = _safe_refine(positive.cut(lip))
         else:
             if not root_clearance.isNull():
-                positive = positive.cut(root_clearance)
+                positive = _cut_tool_solids(positive, root_clearance)
             positive = _safe_refine(positive.fuse(lip))
-            negative = _safe_refine(negative.cut(groove).cut(lip))
+            negative = _cut_tool_solids(negative, groove)
+            negative = _safe_refine(negative.cut(lip))
 
     if not negative.isValid() or not positive.isValid():
         raise RuntimeError(

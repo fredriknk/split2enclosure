@@ -186,6 +186,66 @@ class GeometryTests(unittest.TestCase):
         self.assertLess(symmetric.negative.Volume, without_clearance.negative.Volume)
         self.assertLess(symmetric.positive.Volume, without_clearance.positive.Volume)
 
+    def test_optional_draft_tapers_plane_lip_and_groove(self):
+        source = hollow_box(open_top=False)
+        origin, normal = plane_from_axes("XY", 10)
+        straight = make_enclosure(
+            source,
+            origin,
+            normal,
+            lip_width=1.0,
+            lip_height=2.0,
+            clearance=0.25,
+            vertical_clearance=0.2,
+            draft_angle=0.0,
+            contour_mode="outer",
+        )
+        drafted = make_enclosure(
+            source,
+            origin,
+            normal,
+            lip_width=1.0,
+            lip_height=2.0,
+            clearance=0.25,
+            vertical_clearance=0.2,
+            draft_angle=5.0,
+            contour_mode="outer",
+        )
+        self.assert_valid_pair(source, drafted)
+        self.assertLess(drafted.lip.Volume, straight.lip.Volume)
+        self.assertNotAlmostEqual(drafted.lip.Volume, straight.lip.Volume, places=3)
+
+    def test_optional_draft_works_on_ruled_sketch_panels(self):
+        outer = Part.makeBox(40, 30, 20, App.Vector(-20, -15, -10))
+        inner = Part.makeBox(36, 26, 16, App.Vector(-18, -13, -8))
+        source = outer.cut(inner)
+        path = Part.makePolygon(
+            [
+                App.Vector(-25, -2, 0),
+                App.Vector(-4, -2, 0),
+                App.Vector(3, 5, 0),
+                App.Vector(25, 5, 0),
+            ]
+        )
+        result = make_enclosure_with_sketch(
+            source,
+            path,
+            App.Vector(0, 0, 1),
+            lip_width=1.0,
+            lip_height=1.5,
+            clearance=0.25,
+            vertical_clearance=0.2,
+            draft_angle=3.0,
+            contour_sides={0: "negative", 1: "positive"},
+        )
+        self.assertTrue(result.negative.isValid())
+        self.assertTrue(result.positive.isValid())
+        self.assertEqual(len(result.negative.Solids), 1)
+        self.assertEqual(len(result.positive.Solids), 1)
+        self.assertEqual(result.contour_sides[0], "negative")
+        self.assertEqual(result.contour_sides[1], "positive")
+        self.assertGreater(result.lip.Volume, 0.0)
+
     def test_failed_optional_refinement_keeps_original_shape(self):
         class RefinementFailure:
             def isNull(self):
