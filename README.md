@@ -71,8 +71,6 @@ The original solid is left untouched. Split2Enclosure creates two new
 Green preview contours are **included** in the joint.  
 Red preview contours are **excluded**.
 
-![Contour selection](media/Interface.png)
-
 ## Install
 
 Clone or copy the complete repository folder into FreeCAD's user `Mod`
