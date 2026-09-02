@@ -195,6 +195,12 @@ joint facing upward in the slicer to obtain the intended 45-degree printing
 overhang. Snap retention is continuous around each enabled contour; localized
 or segmented snaps are not yet available.
 
+On a perimeter whose wall thickness varies, snap construction uses the ideal
+perimeter transition and then keeps only geometry supported by existing wall
+material. Thin sections therefore no longer prevent a snap from being created
+on the usable sections. Split2Enclosure prints a warning when the requested lip
+width reaches another section boundary.
+
 Draft must also leave a positive-width lip-tip footprint. In practical terms,
 `tan(draft) * lip height` must remain below the lip width. The groove tapers
 beside the lip over that same height, retaining the configured side clearance,
@@ -346,6 +352,17 @@ modules are implementation details and may evolve independently.
 | A joint is interrupted near an existing feature | Remember that source holes and missing material are preserved; try a smaller joint or another contour |
 
 ## Release history
+
+### v0.5.2
+
+- Drafted planar lips and grooves are constructed before wall clipping, so one
+  locally thin wall can no longer collapse side or tip clearance around the
+  rest of a perimeter.
+- Snap seams are clipped to supporting source material after construction;
+  unsupported thin-wall portions are omitted instead of rejecting the entire
+  contour.
+- Added a thin-wall warning and regression coverage for mixed 1 mm/2 mm walls
+  split on the global XZ plane.
 
 ### v0.5.1
 

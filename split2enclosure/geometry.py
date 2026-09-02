@@ -78,6 +78,7 @@ from ._geometry_plane import (
     _offset_fill,
     _plane_joint_volumes,
     _split_sides,
+    _thin_wall_contact_length,
     _unique_closed_wires,
     _zone_around_wire,
     _zone_around_wire_fallback,
@@ -248,6 +249,19 @@ def make_enclosure(
     ):
         raise ValueError("Snap seam half-size must be smaller than the lip width.")
 
+    selected_wires = groups["negative"] + groups["positive"]
+    if _thin_wall_contact_length(
+        section,
+        selected_wires,
+        parameters.lip_width,
+        parameters.tolerance,
+    ) > parameters.tolerance:
+        App.Console.PrintWarning(
+            "Split2Enclosure: thin wall detected along the selected perimeter. "
+            "Clearance will still be cut, and snap geometry will be retained "
+            "where supporting material exists.\n"
+        )
+
     negative, positive = _split_sides(
         shape, plane_face, origin, normal, parameters.tolerance
     )
@@ -270,6 +284,23 @@ def make_enclosure(
             parameters.tolerance,
         )
 
+    def snap_volume_builder(wires, width, side):
+        return _plane_joint_volumes(
+            section,
+            wires,
+            base_negative,
+            base_positive,
+            normal,
+            width,
+            parameters.lip_height,
+            parameters.clearance,
+            parameters.vertical_clearance,
+            parameters.draft_angle,
+            side,
+            parameters.tolerance,
+            clip_lip=False,
+        )
+
     plan = _JointPlan(
         negative=negative,
         positive=positive,
@@ -287,4 +318,6 @@ def make_enclosure(
         volume_builder,
         "OpenCASCADE produced an invalid result. Try a wider wall, smaller lip, "
         "or a slightly different split offset.",
+        snap_volume_builder=snap_volume_builder,
+        snap_donors={"negative": base_positive, "positive": base_negative},
     )

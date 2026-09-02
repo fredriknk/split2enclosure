@@ -17,6 +17,7 @@ if not os.environ.get("SPLIT2ENCLOSURE_TEST_INSTALLED") and PROJECT_ROOT not in 
 from split2enclosure.geometry import (
     _joint_section,
     _safe_refine,
+    _thin_wall_contact_length,
     analyze_section_contours,
     analyze_sketch_contours,
     make_enclosure,
@@ -411,6 +412,57 @@ class GeometryTests(unittest.TestCase):
         self.assertFalse(drafted.negative.isInside(tip_gap, 1e-6, True))
         self.assertFalse(drafted.positive.isInside(tip_gap, 1e-6, True))
         self.assertTrue(drafted.positive.isInside(above_gap, 1e-6, True))
+
+    def test_thin_wall_does_not_collapse_drafted_clearance_or_snap(self):
+        outer = Part.makeBox(50, 50, 50, App.Vector(-25, -25, -25))
+        cavity = Part.makeBox(48, 46, 46, App.Vector(-24, -23, -23))
+        source = outer.cut(cavity)
+        origin, normal = plane_from_axes("XZ", 0)
+        section, _plane, contours = analyze_section_contours(
+            source, origin, normal
+        )
+        self.assertGreater(
+            _thin_wall_contact_length(section, [contours[0].wire], 1.0, 1e-6),
+            0.0,
+        )
+
+        parameters = dict(
+            lip_width=1.0,
+            lip_height=2.0,
+            clearance=0.2,
+            vertical_clearance=0.2,
+            draft_angle=4.0,
+            lip_on="positive",
+            contour_mode="outer",
+        )
+        drafted = make_enclosure(source, origin, normal, **parameters)
+        self.assert_valid_pair(source, drafted)
+
+        # The thick top wall retains lateral clearance at the drafted tip and
+        # axial clearance above it. The same axial cut also survives where the
+        # side wall is only as wide as the nominal lip.
+        for point in (
+            App.Vector(0, -1.99, 24.04),
+            App.Vector(0, -2.1, 24.5),
+            App.Vector(24.5, -2.1, 0),
+        ):
+            self.assertFalse(drafted.negative.isInside(point, 1e-6, True))
+            self.assertFalse(drafted.positive.isInside(point, 1e-6, True))
+        self.assertTrue(
+            drafted.negative.isInside(App.Vector(0, -2.25, 24.5), 1e-6, True)
+        )
+
+        snapped = make_enclosure(
+            source,
+            origin,
+            normal,
+            contour_snaps={0: True},
+            snap_radius=0.5,
+            snap_clearance=0.05,
+            **parameters,
+        )
+        self.assert_valid_pair(source, snapped)
+        self.assertGreater(snapped.snap_features.Volume, 0.0)
 
     def test_optional_draft_works_on_ruled_sketch_panels(self):
         outer = Part.makeBox(40, 30, 20, App.Vector(-20, -15, -10))

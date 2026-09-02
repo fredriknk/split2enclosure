@@ -376,6 +376,7 @@ def _add_snap_features(
     positive_direction,
     parameters,
     volume_builder,
+    donor_shapes=None,
 ):
     """Construct and apply continuous snap ribs for enabled contours."""
 
@@ -411,6 +412,19 @@ def _add_snap_features(
             parameters.snap_position,
             parameters.tolerance,
         )
+        if donor_shapes is not None:
+            donor = donor_shapes[side]
+            clipped_bump = _safe_refine(bump.common(donor))
+            clipped_stem = _safe_refine(contour_lip.common(donor))
+            clipped_added = _safe_refine(clipped_bump.cut(clipped_stem))
+            if clipped_added.isNull() or not clipped_added.Solids:
+                App.Console.PrintWarning(
+                    "Split2Enclosure: snap seam skipped; no supporting wall "
+                    "material is available on this contour.\n"
+                )
+                continue
+            bump = clipped_bump
+            added = clipped_added
         features.append(added)
         negative, positive = _apply_snap_boolean(
             negative, positive, side, bump, pocket
@@ -450,6 +464,8 @@ def _build_joint_result(
     volume_builder,
     invalid_message,
     discard_slivers=False,
+    snap_volume_builder=None,
+    snap_donors=None,
 ):
     """Run the common Boolean pipeline for an already analyzed split."""
 
@@ -471,10 +487,11 @@ def _build_joint_result(
         plan.contours,
         plan.assignments,
         plan.snap_assignments,
-        plan.section,
+        plan.plane,
         plan.positive_direction,
         parameters,
-        volume_builder,
+        snap_volume_builder or volume_builder,
+        snap_donors,
     )
     if discard_slivers:
         negative = _discard_boolean_slivers(

@@ -253,7 +253,6 @@ def _zone_around_wire(wire, distance, tolerance):
 
 
 def _joint_footprints(section, wires, lip_width, clearance, tolerance):
-    section_material = _combine_faces(section.Faces)
     lip_parts = []
     groove_parts = []
     groove_far = lip_width + clearance
@@ -261,12 +260,14 @@ def _joint_footprints(section, wires, lip_width, clearance, tolerance):
     for wire in wires:
         # Keep the lip anchored to the selected wall perimeter. Clearance is
         # added only at its material-side mating face by widening the groove;
-        # it must not move the lip away from the perimeter itself.
+        # it must not move the lip away from the perimeter itself. Do not clip
+        # these construction footprints to the section yet: a locally thin
+        # wall changes their topology and can make one bad segment collapse the
+        # drafted tool for the complete contour. The final receiver Boolean
+        # clips the lip and groove to actual enclosure material instead.
         lip_zone = _zone_around_wire(wire, lip_width, tolerance)
-        lip_part = lip_zone.common(section_material)
-        groove_part = _zone_around_wire(
-            wire, groove_far, tolerance
-        ).common(section_material)
+        lip_part = lip_zone
+        groove_part = _zone_around_wire(wire, groove_far, tolerance)
         if lip_part.Faces:
             lip_parts.extend(lip_part.Faces)
         if groove_part.Faces:
@@ -283,6 +284,40 @@ def _joint_footprints(section, wires, lip_width, clearance, tolerance):
     return lip_footprint, groove_footprint
 
 
+def _thin_wall_contact_length(section, wires, lip_width, tolerance):
+    """Return boundary length where the requested lip reaches another contour."""
+
+    selected_edges = [edge for wire in wires for edge in wire.Edges]
+    opposite_edges = []
+    for edge in section.Edges:
+        belongs_to_selection = False
+        for selected in selected_edges:
+            try:
+                overlap = edge.common(selected)
+                belongs_to_selection = (
+                    not overlap.isNull()
+                    and overlap.Length >= edge.Length - tolerance
+                )
+            except (Part.OCCError, RuntimeError):
+                belongs_to_selection = edge.isSame(selected)
+            if belongs_to_selection:
+                break
+        if not belongs_to_selection:
+            opposite_edges.append(edge)
+    if not opposite_edges:
+        return 0.0
+    section_material = _combine_faces(section.Faces)
+    contact_length = 0.0
+    opposite_boundary = Part.makeCompound(opposite_edges)
+    for wire in wires:
+        footprint = _zone_around_wire(wire, lip_width, tolerance)
+        material_footprint = footprint.common(section_material)
+        contact = material_footprint.common(opposite_boundary)
+        if not contact.isNull():
+            contact_length += contact.Length
+    return contact_length
+
+
 def _plane_joint_volumes(
     section,
     wires,
@@ -296,6 +331,7 @@ def _plane_joint_volumes(
     draft_angle,
     lip_on,
     tolerance,
+    clip_lip=True,
 ):
     lip_footprint, groove_footprint = _joint_footprints(
         section, wires, lip_width, clearance, tolerance
@@ -320,7 +356,7 @@ def _plane_joint_volumes(
         direction * lip_height,
         draft_angle,
     )
-    lip = _safe_refine(raw_lip.common(receiver))
+    lip = _safe_refine(raw_lip.common(receiver)) if clip_lip else raw_lip
     if lip.isNull() or not lip.Solids:
         raise RuntimeError(
             "The receiving half contains no material inside the requested lip region."
