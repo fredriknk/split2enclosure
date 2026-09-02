@@ -16,6 +16,13 @@ from .geometry import (
     plane_from_axes,
     ruled_contour_positive_direction,
 )
+from .settings import (
+    find_source_settings,
+    load_source_defaults,
+    save_source_defaults,
+    saved_split_defaults,
+    settings_owner,
+)
 
 
 ICON_PATH = os.path.join(
@@ -95,7 +102,10 @@ class EnclosureDialog(QtWidgets.QDialog):
         self._preview_split = None
         self._preview_positive_directions = {}
         self._source_view_state = None
-        self.defaults = load_defaults()
+        self.defaults, self.source_settings = load_source_defaults(
+            source, load_defaults()
+        )
+        self.split_defaults = saved_split_defaults(self.source_settings)
         self.setWindowTitle("Split to enclosure")
         self.setMinimumWidth(480)
 
@@ -105,6 +115,23 @@ class EnclosureDialog(QtWidgets.QDialog):
         )
         source_label.setTextFormat(QtCore.Qt.RichText)
         layout.addWidget(source_label)
+
+        owner = settings_owner(source)
+        self.remember_settings = QtWidgets.QCheckBox(
+            "Remember settings for: {}".format(owner.Label)
+        )
+        self.remember_settings.setChecked(True)
+        if self.source_settings is not None:
+            self.remember_settings.setToolTip(
+                "Loaded from '{}'; Create will update that VarSet.".format(
+                    self.source_settings.Label
+                )
+            )
+        else:
+            self.remember_settings.setToolTip(
+                "Create will add an editable Enclosure defaults VarSet to this document."
+            )
+        layout.addWidget(self.remember_settings)
 
         form = QtWidgets.QFormLayout()
         layout.addLayout(form)
@@ -117,9 +144,16 @@ class EnclosureDialog(QtWidgets.QDialog):
         if split_sketch is not None:
             self.plane_mode.addItem("Selected open sketch")
             self.plane_mode.setCurrentIndex(self.plane_mode.count() - 1)
+        elif reference_face is None:
+            saved_mode = self.split_defaults.get("plane_mode")
+            saved_index = self.plane_mode.findText(saved_mode) if saved_mode else -1
+            if saved_index >= 0:
+                self.plane_mode.setCurrentIndex(saved_index)
         form.addRow("Split plane", self.plane_mode)
 
-        self.offset = self._length_box(-100000.0, 100000.0, 0.0)
+        self.offset = self._length_box(
+            -100000.0, 100000.0, self.split_defaults.get("offset", 0.0)
+        )
         self.offset.setToolTip("Distance along the plane's positive normal")
         form.addRow("Plane offset", self.offset)
 
@@ -320,6 +354,7 @@ class EnclosureDialog(QtWidgets.QDialog):
             "offset": offset,
             "split_kind": "sketch" if mode == "Selected open sketch" else "plane",
             "split_sketch": self.split_sketch,
+            "remember_settings": self.remember_settings.isChecked(),
         }
 
     def _build_preview(self):
@@ -615,9 +650,15 @@ def _add_result_to_document(source, result, parameters):
     doc = source.Document
     doc.openTransaction("Split enclosure with lip and groove")
     try:
+        settings = (
+            save_source_defaults(source, parameters)
+            if parameters.get("remember_settings", True)
+            else find_source_settings(source)
+        )
         container = doc.addObject("App::Part", "Split2EnclosureResult")
         container.Label = "Split enclosure: {}".format(source.Label)
         container.addProperty("App::PropertyLink", "Source", "Split parameters")
+        container.addProperty("App::PropertyLink", "Settings", "Split parameters")
         container.addProperty("App::PropertyString", "PlaneMode", "Split parameters")
         container.addProperty("App::PropertyLink", "SplitSketch", "Split parameters")
         container.addProperty("App::PropertyVector", "PlaneOrigin", "Split parameters")
@@ -639,6 +680,7 @@ def _add_result_to_document(source, result, parameters):
         container.addProperty("App::PropertyInteger", "JointContours", "Diagnostics")
 
         container.Source = source
+        container.Settings = settings
         container.SplitSketch = parameters.get("split_sketch")
         container.PlaneMode = parameters["plane_mode"]
         container.PlaneOrigin = parameters["plane_origin"]
@@ -741,6 +783,7 @@ def run():
         engine_parameters.pop("offset")
         split_kind = engine_parameters.pop("split_kind")
         selected_sketch = engine_parameters.pop("split_sketch")
+        engine_parameters.pop("remember_settings")
         if split_kind == "sketch":
             plane_origin = engine_parameters.pop("plane_origin")
             sketch_normal = engine_parameters.pop("plane_normal")

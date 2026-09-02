@@ -12,6 +12,7 @@ import Part
 from PySide import QtWidgets
 
 from split2enclosure.command import EnclosureDialog
+from split2enclosure.settings import save_source_defaults
 
 application = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
 document = App.newDocument("Split2EnclosureGuiSmoke")
@@ -26,6 +27,33 @@ assert parameters["snap_clearance"] >= 0
 assert 0.1 <= parameters["snap_position"] <= 0.9
 assert parameters["contour_snaps"] is None
 dialog.close()
+
+save_source_defaults(
+    source,
+    {
+        "lip_width": 1.65,
+        "lip_height": 2.75,
+        "clearance": 0.23,
+        "vertical_clearance": 0.34,
+        "draft_angle": 1.0,
+        "snap_radius": 0.17,
+        "snap_clearance": 0.04,
+        "snap_position": 0.61,
+        "lip_on": "positive",
+        "plane_mode": "Global YZ",
+        "offset": 4.5,
+    },
+)
+remembered_dialog = EnclosureDialog(source, None)
+remembered_parameters = remembered_dialog.parameters()
+assert remembered_parameters["plane_mode"] == "Global YZ"
+assert remembered_parameters["offset"] == 4.5
+assert remembered_parameters["lip_width"] == 1.65
+assert remembered_parameters["lip_height"] == 2.75
+assert remembered_parameters["lip_on"] == "positive"
+assert remembered_parameters["remember_settings"]
+assert remembered_dialog.source_settings is not None
+remembered_dialog.close()
 
 sketch = document.addObject("Part::Feature", "SplitSketch")
 sketch.Shape = Part.makePolygon(

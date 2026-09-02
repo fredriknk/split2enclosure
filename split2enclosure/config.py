@@ -36,7 +36,9 @@ def _number(name, value, minimum, maximum, inclusive_minimum=True):
     return value
 
 
-def _validated(values):
+def validate_defaults(values):
+    """Return a validated, normalized complete defaults mapping."""
+
     result = dict(DEFAULTS)
     result["lip_width"] = _number("lip_width", values["lip_width"], 0, 1000, False)
     result["lip_height"] = _number("lip_height", values["lip_height"], 0, 1000, False)
@@ -73,7 +75,7 @@ def load_defaults(path=None):
             raise ValueError("unknown setting(s): {}".format(", ".join(unknown)))
         values = dict(DEFAULTS)
         values.update(loaded)
-        return _validated(values)
+        return validate_defaults(values)
     except FileNotFoundError:
         return dict(DEFAULTS)
     except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
