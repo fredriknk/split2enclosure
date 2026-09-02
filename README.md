@@ -291,6 +291,25 @@ This is more reliable than collecting model edges by name: FreeCAD's generated
 edge numbers can change after Boolean operations, while the cross-section is
 derived directly from the final solid.
 
+## Geometry code layout
+
+The geometry engine is divided by responsibility so changes do not require
+navigating one monolithic implementation:
+
+- `geometry.py` is the stable public API and compatibility facade.
+- `_geometry_types.py` contains result and build-state data structures.
+- `_geometry_common.py` contains low-level vectors, faces, and robust Boolean
+  operations.
+- `_geometry_sketch.py` handles open-sketch splitting, ruled contours, and
+  sketch-seam joint volumes.
+- `_geometry_plane.py` handles planar splitting, contour classification,
+  offsets, and planar joint volumes.
+- `_geometry_joint.py` contains shared lip, groove, draft, clearance, snap, and
+  final Boolean-pipeline logic.
+
+Callers should continue importing from `split2enclosure.geometry`; the private
+modules are implementation details and may evolve independently.
+
 ## Current limitations
 
 - The source must be a BRep solid, not a mesh. Convert meshes before running.
