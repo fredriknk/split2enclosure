@@ -56,6 +56,38 @@ class SketchSplitResult:
     extrusion_normal: App.Vector
 
 
+@dataclass(frozen=True)
+class _JointParameters:
+    """Normalized parameters shared by plane and sketch joint builders."""
+
+    lip_width: float
+    lip_height: float
+    clearance: float
+    vertical_clearance: float
+    draft_angle: float
+    lip_on: str
+    contour_mode: str
+    snap_radius: float
+    snap_clearance: float
+    snap_position: float
+    tolerance: float
+
+
+@dataclass
+class _JointPlan:
+    """Analyzed split state consumed by the shared joint-building pipeline."""
+
+    negative: Part.Shape
+    positive: Part.Shape
+    section: Part.Shape
+    plane: Part.Shape
+    contours: list
+    groups: dict
+    assignments: dict
+    snap_assignments: dict
+    positive_direction: App.Vector
+
+
 def _unit(vector):
     result = App.Vector(vector)
     if result.Length <= DEFAULT_TOLERANCE:
@@ -1051,6 +1083,277 @@ def _ruled_joint_volumes(
     return lip, groove, _combine(root_parts)
 
 
+def _joint_parameters(
+    lip_width,
+    lip_height,
+    clearance,
+    vertical_clearance,
+    draft_angle,
+    lip_on,
+    contour_mode,
+    snap_radius,
+    snap_clearance,
+    snap_position,
+    tolerance,
+):
+    """Normalize and validate parameters used by both joint workflows."""
+
+    parameters = _JointParameters(
+        lip_width=float(lip_width),
+        lip_height=float(lip_height),
+        clearance=float(clearance),
+        vertical_clearance=float(vertical_clearance),
+        draft_angle=float(draft_angle),
+        lip_on=lip_on,
+        contour_mode=contour_mode,
+        snap_radius=float(snap_radius),
+        snap_clearance=float(snap_clearance),
+        snap_position=float(snap_position),
+        tolerance=max(float(tolerance), DEFAULT_TOLERANCE),
+    )
+    if parameters.lip_width <= 0 or parameters.lip_height <= 0:
+        raise ValueError("Lip width and height must be greater than zero.")
+    if parameters.clearance < 0 or parameters.vertical_clearance < 0:
+        raise ValueError("Clearances must not be negative.")
+    if parameters.draft_angle < 0 or parameters.draft_angle >= 45:
+        raise ValueError("Draft angle must be at least 0 and less than 45 degrees.")
+    if parameters.snap_radius <= 0 or parameters.snap_clearance < 0:
+        raise ValueError(
+            "Snap radius must be positive and snap clearance non-negative."
+        )
+    if not 0.1 <= parameters.snap_position <= 0.9:
+        raise ValueError("Snap position must be between 0.1 and 0.9 of lip height.")
+    if parameters.lip_on not in ("negative", "positive"):
+        raise ValueError("lip_on must be 'negative' or 'positive'.")
+    if parameters.contour_mode not in ("outer", "internal"):
+        raise ValueError("contour_mode must be 'outer' or 'internal'.")
+    return parameters
+
+
+def _wire_batches(contours, assignments, snap_assignments):
+    """Yield contours grouped by owner and whether they need a snap seam."""
+
+    for side in ("negative", "positive"):
+        for snapped in (False, True):
+            wires = [
+                contour.wire
+                for contour in contours
+                if assignments[contour.index] == side
+                and snap_assignments[contour.index] == snapped
+            ]
+            if wires:
+                yield side, snapped, wires
+
+
+def _apply_joint_boolean(negative, positive, side, lip, groove):
+    """Transfer one lip to its owner and cut its matching receiver groove."""
+
+    if side == "negative":
+        negative = _safe_refine(negative.fuse(lip))
+        positive = _cut_tool_solids(positive, groove)
+        positive = _safe_refine(positive.cut(lip))
+    else:
+        positive = _safe_refine(positive.fuse(lip))
+        negative = _cut_tool_solids(negative, groove)
+        negative = _safe_refine(negative.cut(lip))
+    return negative, positive
+
+
+def _add_joint_batches(
+    negative,
+    positive,
+    contours,
+    assignments,
+    snap_assignments,
+    parameters,
+    volume_builder,
+):
+    """Build and apply ordinary/narrowed joint batches for both owners."""
+
+    lips = []
+    grooves = []
+    root_tools = {"negative": [], "positive": []}
+    for side, snapped, wires in _wire_batches(
+        contours, assignments, snap_assignments
+    ):
+        width = (
+            parameters.lip_width - parameters.snap_radius
+            if snapped
+            else parameters.lip_width
+        )
+        lip, groove, root_clearance = volume_builder(wires, width, side)
+        lips.append(lip)
+        grooves.append(groove)
+        if root_clearance is not None and not root_clearance.isNull():
+            root_tools[side].append(root_clearance)
+        negative, positive = _apply_joint_boolean(
+            negative, positive, side, lip, groove
+        )
+    return negative, positive, lips, grooves, root_tools
+
+
+def _apply_root_clearances(negative, positive, grouped_tools):
+    """Intersect each owner's root tools, then relieve that owner's shoulder."""
+
+    applied = []
+    for side, tools in grouped_tools.items():
+        if not tools:
+            continue
+        root_clearance = tools[0]
+        for tool in tools[1:]:
+            root_clearance = root_clearance.common(tool)
+        if root_clearance.isNull() or not root_clearance.Solids:
+            continue
+        applied.append(root_clearance)
+        if side == "negative":
+            negative = _cut_tool_solids(negative, root_clearance)
+        else:
+            positive = _cut_tool_solids(positive, root_clearance)
+    return negative, positive, applied
+
+
+def _apply_snap_boolean(negative, positive, side, bump, pocket):
+    """Add a snap rib to its owner and cut the matching receiver channel."""
+
+    if side == "negative":
+        negative = _fuse_tool_solids(negative, bump)
+        positive = _safe_refine(positive.cut(pocket).cut(bump))
+    else:
+        positive = _fuse_tool_solids(positive, bump)
+        negative = _safe_refine(negative.cut(pocket).cut(bump))
+    return negative, positive
+
+
+def _add_snap_features(
+    negative,
+    positive,
+    contours,
+    assignments,
+    snap_assignments,
+    section,
+    positive_direction,
+    parameters,
+    volume_builder,
+):
+    """Construct and apply continuous snap ribs for enabled contours."""
+
+    features = []
+    for contour in contours:
+        side = assignments[contour.index]
+        if side == "none" or not snap_assignments[contour.index]:
+            continue
+        contour_lip, contour_groove, _root = volume_builder(
+            [contour.wire], parameters.lip_width - parameters.snap_radius, side
+        )
+        wide_lip, _groove, _root = volume_builder(
+            [contour.wire], parameters.lip_width, side
+        )
+        _lip, wide_groove, _root = volume_builder(
+            [contour.wire],
+            parameters.lip_width + parameters.snap_clearance,
+            side,
+        )
+        direction = (
+            positive_direction if side == "negative" else -positive_direction
+        )
+        bump, pocket, added = _snap_for_contour(
+            section,
+            contour_lip,
+            contour_groove,
+            wide_lip,
+            wide_groove,
+            direction,
+            parameters.lip_height,
+            parameters.snap_radius,
+            parameters.snap_clearance,
+            parameters.snap_position,
+            parameters.tolerance,
+        )
+        features.append(added)
+        negative, positive = _apply_snap_boolean(
+            negative, positive, side, bump, pocket
+        )
+    return negative, positive, features
+
+
+def _enclosure_result(
+    plan,
+    negative,
+    positive,
+    lips,
+    grooves,
+    root_clearances,
+    snap_features,
+):
+    """Package final shapes and selection diagnostics for the public API."""
+
+    return EnclosureResult(
+        negative=negative,
+        positive=positive,
+        lip=_combine(lips),
+        groove=_combine(grooves),
+        section=plan.section,
+        plane=plan.plane,
+        internal_wires=plan.groups["negative"] + plan.groups["positive"],
+        contour_sides=plan.assignments,
+        root_clearance=_combine(root_clearances),
+        snap_features=_combine(snap_features),
+        contour_snaps=plan.snap_assignments,
+    )
+
+
+def _build_joint_result(
+    plan,
+    parameters,
+    volume_builder,
+    invalid_message,
+    discard_slivers=False,
+):
+    """Run the common Boolean pipeline for an already analyzed split."""
+
+    negative, positive, lips, grooves, root_tools = _add_joint_batches(
+        plan.negative,
+        plan.positive,
+        plan.contours,
+        plan.assignments,
+        plan.snap_assignments,
+        parameters,
+        volume_builder,
+    )
+    negative, positive, root_clearances = _apply_root_clearances(
+        negative, positive, root_tools
+    )
+    negative, positive, snap_features = _add_snap_features(
+        negative,
+        positive,
+        plan.contours,
+        plan.assignments,
+        plan.snap_assignments,
+        plan.section,
+        plan.positive_direction,
+        parameters,
+        volume_builder,
+    )
+    if discard_slivers:
+        negative = _discard_boolean_slivers(
+            negative, parameters.tolerance, keep_largest=True
+        )
+        positive = _discard_boolean_slivers(
+            positive, parameters.tolerance, keep_largest=True
+        )
+    if not negative.isValid() or not positive.isValid():
+        raise RuntimeError(invalid_message)
+    return _enclosure_result(
+        plan,
+        negative,
+        positive,
+        lips,
+        grooves,
+        root_clearances,
+        snap_features,
+    )
+
+
 def make_enclosure_with_sketch(
     shape,
     sketch_shape,
@@ -1072,182 +1375,71 @@ def make_enclosure_with_sketch(
 ):
     """Split on an extruded open sketch and add a face-relative lip/groove."""
 
-    lip_width = float(lip_width)
-    lip_height = float(lip_height)
-    clearance = float(clearance)
-    vertical_clearance = float(vertical_clearance)
-    draft_angle = float(draft_angle)
-    snap_radius = float(snap_radius)
-    snap_clearance = float(snap_clearance)
-    snap_position = float(snap_position)
-    tolerance = max(float(tolerance), DEFAULT_TOLERANCE)
-    if lip_width <= 0 or lip_height <= 0:
-        raise ValueError("Lip width and height must be greater than zero.")
-    if clearance < 0 or vertical_clearance < 0:
-        raise ValueError("Clearances must not be negative.")
-    if draft_angle < 0 or draft_angle >= 45:
-        raise ValueError("Draft angle must be at least 0 and less than 45 degrees.")
-    if snap_radius <= 0 or snap_clearance < 0:
-        raise ValueError("Snap radius must be positive and snap clearance non-negative.")
-    if not 0.1 <= snap_position <= 0.9:
-        raise ValueError("Snap position must be between 0.1 and 0.9 of lip height.")
-    if lip_on not in ("negative", "positive"):
-        raise ValueError("lip_on must be 'negative' or 'positive'.")
-    if contour_mode not in ("outer", "internal"):
-        raise ValueError("contour_mode must be 'outer' or 'internal'.")
-
+    parameters = _joint_parameters(
+        lip_width,
+        lip_height,
+        clearance,
+        vertical_clearance,
+        draft_angle,
+        lip_on,
+        contour_mode,
+        snap_radius,
+        snap_clearance,
+        snap_position,
+        tolerance,
+    )
     split, contours = analyze_sketch_contours(
-        shape, sketch_shape, sketch_normal, tolerance
+        shape, sketch_shape, sketch_normal, parameters.tolerance
     )
     groups, assignments = _contour_groups(
-        contours, contour_sides, contour_indices, lip_on, contour_mode
+        contours,
+        contour_sides,
+        contour_indices,
+        parameters.lip_on,
+        parameters.contour_mode,
     )
     snap_assignments = _normalized_snap_assignments(contours, contour_snaps)
-    if any(snap_assignments.values()) and lip_width - snap_radius <= tolerance:
+    if (
+        any(snap_assignments.values())
+        and parameters.lip_width - parameters.snap_radius <= parameters.tolerance
+    ):
         raise ValueError("Snap seam half-size must be smaller than the lip width.")
     joint_positive_direction = ruled_contour_positive_direction(
-        split, contours[0].wire, tolerance
+        split, contours[0].wire, parameters.tolerance
     )
-    negative = split.negative
-    positive = split.positive
-    lips = []
-    grooves = []
-    root_clearance_groups = {"negative": [], "positive": []}
-    for side in ("negative", "positive"):
-        for snapped in (False, True):
-            wires = [
-                contour.wire
-                for contour in contours
-                if assignments[contour.index] == side
-                and snap_assignments[contour.index] == snapped
-            ]
-            if not wires:
-                continue
-            effective_width = lip_width - snap_radius if snapped else lip_width
-            lip, groove, root_clearance = _ruled_joint_volumes(
-                split,
-                wires,
-                effective_width,
-                lip_height,
-                clearance,
-                vertical_clearance,
-                draft_angle,
-                side,
-                joint_positive_direction,
-                tolerance,
-            )
-            lips.append(lip)
-            grooves.append(groove)
-            if root_clearance is not None and not root_clearance.isNull():
-                root_clearance_groups[side].append(root_clearance)
-            if side == "negative":
-                negative = _safe_refine(negative.fuse(lip))
-                positive = _cut_tool_solids(positive, groove)
-                positive = _safe_refine(positive.cut(lip))
-            else:
-                positive = _safe_refine(positive.fuse(lip))
-                negative = _cut_tool_solids(negative, groove)
-                negative = _safe_refine(negative.cut(lip))
 
-    root_clearances = []
-    for side, tools in root_clearance_groups.items():
-        if not tools:
-            continue
-        root_clearance = tools[0]
-        for tool in tools[1:]:
-            root_clearance = root_clearance.common(tool)
-        if root_clearance.isNull() or not root_clearance.Solids:
-            continue
-        root_clearances.append(root_clearance)
-        if side == "negative":
-            negative = _cut_tool_solids(negative, root_clearance)
-        else:
-            positive = _cut_tool_solids(positive, root_clearance)
+    def volume_builder(wires, width, side):
+        return _ruled_joint_volumes(
+            split,
+            wires,
+            width,
+            parameters.lip_height,
+            parameters.clearance,
+            parameters.vertical_clearance,
+            parameters.draft_angle,
+            side,
+            joint_positive_direction,
+            parameters.tolerance,
+        )
 
-    snap_features = []
-    for contour in contours:
-        side = assignments[contour.index]
-        if side == "none" or not snap_assignments[contour.index]:
-            continue
-        contour_lip, contour_groove, _unused_root = _ruled_joint_volumes(
-            split,
-            [contour.wire],
-            lip_width - snap_radius,
-            lip_height,
-            clearance,
-            vertical_clearance,
-            draft_angle,
-            side,
-            joint_positive_direction,
-            tolerance,
-        )
-        wide_lip, _unused_groove, _unused_root = _ruled_joint_volumes(
-            split,
-            [contour.wire],
-            lip_width,
-            lip_height,
-            clearance,
-            vertical_clearance,
-            draft_angle,
-            side,
-            joint_positive_direction,
-            tolerance,
-        )
-        _unused_lip, wide_groove, _unused_root = _ruled_joint_volumes(
-            split,
-            [contour.wire],
-            lip_width + snap_clearance,
-            lip_height,
-            clearance,
-            vertical_clearance,
-            draft_angle,
-            side,
-            joint_positive_direction,
-            tolerance,
-        )
-        extrusion_direction = (
-            joint_positive_direction
-            if side == "negative"
-            else -joint_positive_direction
-        )
-        bump, pocket, added = _snap_for_contour(
-            split.section,
-            contour_lip,
-            contour_groove,
-            wide_lip,
-            wide_groove,
-            extrusion_direction,
-            lip_height,
-            snap_radius,
-            snap_clearance,
-            snap_position,
-            tolerance,
-        )
-        snap_features.append(added)
-        if side == "negative":
-            negative = _fuse_tool_solids(negative, bump)
-            positive = _safe_refine(positive.cut(pocket).cut(bump))
-        else:
-            positive = _fuse_tool_solids(positive, bump)
-            negative = _safe_refine(negative.cut(pocket).cut(bump))
-    negative = _discard_boolean_slivers(negative, tolerance, keep_largest=True)
-    positive = _discard_boolean_slivers(positive, tolerance, keep_largest=True)
-    if not negative.isValid() or not positive.isValid():
-        raise RuntimeError(
-            "OpenCASCADE produced an invalid sketch-seam joint. Try smaller joint dimensions."
-        )
-    return EnclosureResult(
-        negative=negative,
-        positive=positive,
-        lip=_combine(lips),
-        groove=_combine(grooves),
+    plan = _JointPlan(
+        negative=split.negative,
+        positive=split.positive,
         section=split.section,
         plane=split.surface,
-        internal_wires=groups["negative"] + groups["positive"],
-        contour_sides=assignments,
-        root_clearance=_combine(root_clearances),
-        snap_features=_combine(snap_features),
-        contour_snaps=snap_assignments,
+        contours=contours,
+        groups=groups,
+        assignments=assignments,
+        snap_assignments=snap_assignments,
+        positive_direction=joint_positive_direction,
+    )
+    return _build_joint_result(
+        plan,
+        parameters,
+        volume_builder,
+        "OpenCASCADE produced an invalid sketch-seam joint. "
+        "Try smaller joint dimensions.",
+        discard_slivers=True,
     )
 
 
@@ -1777,188 +1969,76 @@ def make_enclosure(
         raise ValueError("Select a non-empty solid BRep shape.")
     if not shape.isValid():
         raise ValueError("The selected shape is not a valid BRep.")
-    lip_width = float(lip_width)
-    lip_height = float(lip_height)
-    clearance = float(clearance)
-    vertical_clearance = float(vertical_clearance)
-    draft_angle = float(draft_angle)
-    snap_radius = float(snap_radius)
-    snap_clearance = float(snap_clearance)
-    snap_position = float(snap_position)
-    tolerance = max(float(tolerance), DEFAULT_TOLERANCE)
-    if lip_width <= 0 or lip_height <= 0:
-        raise ValueError("Lip width and height must be greater than zero.")
-    if clearance < 0 or vertical_clearance < 0:
-        raise ValueError("Clearances must not be negative.")
-    if draft_angle < 0 or draft_angle >= 45:
-        raise ValueError("Draft angle must be at least 0 and less than 45 degrees.")
-    if snap_radius <= 0 or snap_clearance < 0:
-        raise ValueError("Snap radius must be positive and snap clearance non-negative.")
-    if not 0.1 <= snap_position <= 0.9:
-        raise ValueError("Snap position must be between 0.1 and 0.9 of lip height.")
-    if lip_on not in ("negative", "positive"):
-        raise ValueError("lip_on must be 'negative' or 'positive'.")
-    if contour_mode not in ("outer", "internal"):
-        raise ValueError("contour_mode must be 'outer' or 'internal'.")
+    parameters = _joint_parameters(
+        lip_width,
+        lip_height,
+        clearance,
+        vertical_clearance,
+        draft_angle,
+        lip_on,
+        contour_mode,
+        snap_radius,
+        snap_clearance,
+        snap_position,
+        tolerance,
+    )
 
     origin = App.Vector(plane_origin)
     normal = _unit(plane_normal)
     section, plane_face, contours = analyze_section_contours(
-        shape, origin, normal, tolerance
+        shape, origin, normal, parameters.tolerance
     )
     groups, assignments = _contour_groups(
-        contours, contour_sides, contour_indices, lip_on, contour_mode
+        contours,
+        contour_sides,
+        contour_indices,
+        parameters.lip_on,
+        parameters.contour_mode,
     )
     snap_assignments = _normalized_snap_assignments(contours, contour_snaps)
-    if any(snap_assignments.values()) and lip_width - snap_radius <= tolerance:
+    if (
+        any(snap_assignments.values())
+        and parameters.lip_width - parameters.snap_radius <= parameters.tolerance
+    ):
         raise ValueError("Snap seam half-size must be smaller than the lip width.")
 
     negative, positive = _split_sides(
-        shape, plane_face, origin, normal, tolerance
+        shape, plane_face, origin, normal, parameters.tolerance
     )
     base_negative = negative
     base_positive = positive
-    lips = []
-    grooves = []
-    root_clearance_groups = {"negative": [], "positive": []}
-    for side in ("negative", "positive"):
-        for snapped in (False, True):
-            wires = [
-                contour.wire
-                for contour in contours
-                if assignments[contour.index] == side
-                and snap_assignments[contour.index] == snapped
-            ]
-            if not wires:
-                continue
-            effective_width = lip_width - snap_radius if snapped else lip_width
-            lip, groove, root_clearance = _plane_joint_volumes(
-                section,
-                wires,
-                base_negative,
-                base_positive,
-                normal,
-                effective_width,
-                lip_height,
-                clearance,
-                vertical_clearance,
-                draft_angle,
-                side,
-                tolerance,
-            )
-            lips.append(lip)
-            grooves.append(groove)
-            if not root_clearance.isNull():
-                root_clearance_groups[side].append(root_clearance)
-            if side == "negative":
-                negative = _safe_refine(negative.fuse(lip))
-                positive = _cut_tool_solids(positive, groove)
-                positive = _safe_refine(positive.cut(lip))
-            else:
-                positive = _safe_refine(positive.fuse(lip))
-                negative = _cut_tool_solids(negative, groove)
-                negative = _safe_refine(negative.cut(lip))
 
-    root_clearances = []
-    for side, tools in root_clearance_groups.items():
-        if not tools:
-            continue
-        root_clearance = tools[0]
-        for tool in tools[1:]:
-            root_clearance = root_clearance.common(tool)
-        if root_clearance.isNull() or not root_clearance.Solids:
-            continue
-        root_clearances.append(root_clearance)
-        if side == "negative":
-            negative = _cut_tool_solids(negative, root_clearance)
-        else:
-            positive = _cut_tool_solids(positive, root_clearance)
-
-    snap_features = []
-    for contour in contours:
-        side = assignments[contour.index]
-        if side == "none" or not snap_assignments[contour.index]:
-            continue
-        contour_lip, contour_groove, _unused_root = _plane_joint_volumes(
+    def volume_builder(wires, width, side):
+        return _plane_joint_volumes(
             section,
-            [contour.wire],
+            wires,
             base_negative,
             base_positive,
             normal,
-            lip_width - snap_radius,
-            lip_height,
-            clearance,
-            vertical_clearance,
-            draft_angle,
+            width,
+            parameters.lip_height,
+            parameters.clearance,
+            parameters.vertical_clearance,
+            parameters.draft_angle,
             side,
-            tolerance,
-        )
-        wide_lip, _unused_groove, _unused_root = _plane_joint_volumes(
-            section,
-            [contour.wire],
-            base_negative,
-            base_positive,
-            normal,
-            lip_width,
-            lip_height,
-            clearance,
-            vertical_clearance,
-            draft_angle,
-            side,
-            tolerance,
-        )
-        _unused_lip, wide_groove, _unused_root = _plane_joint_volumes(
-            section,
-            [contour.wire],
-            base_negative,
-            base_positive,
-            normal,
-            lip_width + snap_clearance,
-            lip_height,
-            clearance,
-            vertical_clearance,
-            draft_angle,
-            side,
-            tolerance,
-        )
-        extrusion_direction = normal if side == "negative" else -normal
-        bump, pocket, added = _snap_for_contour(
-            section,
-            contour_lip,
-            contour_groove,
-            wide_lip,
-            wide_groove,
-            extrusion_direction,
-            lip_height,
-            snap_radius,
-            snap_clearance,
-            snap_position,
-            tolerance,
-        )
-        snap_features.append(added)
-        if side == "negative":
-            negative = _fuse_tool_solids(negative, bump)
-            positive = _safe_refine(positive.cut(pocket).cut(bump))
-        else:
-            positive = _fuse_tool_solids(positive, bump)
-            negative = _safe_refine(negative.cut(pocket).cut(bump))
-
-    if not negative.isValid() or not positive.isValid():
-        raise RuntimeError(
-            "OpenCASCADE produced an invalid result. Try a wider wall, smaller lip, "
-            "or a slightly different split offset."
+            parameters.tolerance,
         )
 
-    return EnclosureResult(
+    plan = _JointPlan(
         negative=negative,
         positive=positive,
-        lip=_combine(lips),
-        groove=_combine(grooves),
         section=section,
         plane=plane_face,
-        internal_wires=groups["negative"] + groups["positive"],
-        contour_sides=assignments,
-        root_clearance=_combine(root_clearances),
-        snap_features=_combine(snap_features),
-        contour_snaps=snap_assignments,
+        contours=contours,
+        groups=groups,
+        assignments=assignments,
+        snap_assignments=snap_assignments,
+        positive_direction=normal,
+    )
+    return _build_joint_result(
+        plan,
+        parameters,
+        volume_builder,
+        "OpenCASCADE produced an invalid result. Try a wider wall, smaller lip, "
+        "or a slightly different split offset.",
     )
