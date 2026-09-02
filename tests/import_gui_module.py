@@ -63,8 +63,16 @@ sketch_dialog = EnclosureDialog(source, None, split_sketch=sketch)
 sketch_parameters = sketch_dialog.parameters()
 assert sketch_parameters["split_kind"] == "sketch"
 assert sketch_parameters["plane_mode"] == "Selected open sketch"
+assert sketch_parameters["reference_kind"] == "sketch"
+assert sketch_parameters["reference_object"] == sketch
 assert not sketch_dialog.offset.isEnabled()
 sketch_dialog.close()
+
+save_source_defaults(source, sketch_parameters)
+restored_sketch_dialog = EnclosureDialog(source, None)
+assert restored_sketch_dialog.split_sketch == sketch
+assert restored_sketch_dialog.plane_mode.currentText() == "Selected open sketch"
+restored_sketch_dialog.close()
 App.closeDocument(document.Name)
 
 print("GUI module imported")

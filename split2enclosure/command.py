@@ -18,11 +18,14 @@ from .geometry import (
 )
 from .settings import (
     find_source_settings,
+    latest_source_settings,
     load_source_defaults,
     save_source_defaults,
+    saved_operation_state,
     saved_split_defaults,
     settings_owner,
 )
+from .selection_state import encode_contour_state, match_contour_state
 
 
 ICON_PATH = os.path.join(
@@ -38,11 +41,14 @@ def _shape_of(obj):
     return shape if shape is not None and not shape.isNull() else None
 
 
-def _selection_context():
+def _selection_details():
     source = None
     selected_face = None
     selected_datum = None
     selected_sketch = None
+    reference_object = None
+    reference_subname = ""
+    reference_kind = "global"
 
     for selection in Gui.Selection.getSelectionEx():
         obj = selection.Object
@@ -51,17 +57,72 @@ def _selection_context():
             selected_sketch = obj
         if source is None and shape is not None and shape.Solids:
             source = obj
-        for subobject in selection.SubObjects:
+        sub_names = list(getattr(selection, "SubElementNames", []))
+        for sub_index, subobject in enumerate(selection.SubObjects):
             if subobject.ShapeType == "Face" and isinstance(subobject.Surface, Part.Plane):
                 selected_face = subobject
+                reference_object = obj
+                reference_subname = (
+                    sub_names[sub_index] if sub_index < len(sub_names) else ""
+                )
+                reference_kind = "face"
                 break
         if selected_face is None and shape is not None and shape.Faces:
             face = shape.Faces[0]
             if isinstance(face.Surface, Part.Plane) and obj.TypeId == "PartDesign::Plane":
                 selected_datum = face
+                reference_object = obj
+                reference_subname = ""
+                reference_kind = "datum"
 
     reference = selected_face or selected_datum
-    return source, reference, selected_sketch
+    if selected_sketch is not None:
+        reference_object = selected_sketch
+        reference_subname = ""
+        reference_kind = "sketch"
+    return (
+        source,
+        reference,
+        selected_sketch,
+        reference_object,
+        reference_subname,
+        reference_kind,
+    )
+
+
+def _selection_context():
+    """Backward-compatible compact form used by GUI smoke checks."""
+
+    return _selection_details()[:3]
+
+
+def _saved_reference(settings):
+    state = saved_operation_state(settings)
+    kind = state.get("reference_kind", "global")
+    obj = state.get("reference_object")
+    subname = state.get("reference_subname", "")
+    if kind == "sketch":
+        shape = _shape_of(obj)
+        if shape is not None and shape.Edges:
+            return None, obj, obj, "", "sketch"
+    elif kind == "face" and obj is not None and subname:
+        try:
+            face = obj.getSubObject(subname)
+        except (AttributeError, RuntimeError):
+            face = None
+        if (
+            face is not None
+            and getattr(face, "ShapeType", "") == "Face"
+            and isinstance(face.Surface, Part.Plane)
+        ):
+            return face, None, obj, subname, "face"
+    elif kind == "datum":
+        shape = _shape_of(obj)
+        if shape is not None and shape.Faces:
+            face = shape.Faces[0]
+            if isinstance(face.Surface, Part.Plane):
+                return face, None, obj, "", "datum"
+    return None, None, None, "", "global"
 
 
 def _sketch_normal(sketch):
@@ -86,11 +147,28 @@ def _plane_from_face(face, offset):
 
 
 class EnclosureDialog(QtWidgets.QDialog):
-    def __init__(self, source, reference_face, parent=None, split_sketch=None):
+    def __init__(
+        self,
+        source,
+        reference_face,
+        parent=None,
+        split_sketch=None,
+        reference_object=None,
+        reference_subname="",
+        reference_kind="global",
+    ):
         super().__init__(parent)
+        if split_sketch is not None:
+            reference_object = reference_object or split_sketch
+            reference_kind = "sketch"
+        elif reference_face is not None and reference_kind == "global":
+            reference_kind = "face"
         self.source = source
         self.reference_face = reference_face
         self.split_sketch = split_sketch
+        self.reference_object = reference_object
+        self.reference_subname = reference_subname
+        self.reference_kind = reference_kind
         self._contours = []
         self._preview_group = None
         self._preview_objects = {}
@@ -106,6 +184,15 @@ class EnclosureDialog(QtWidgets.QDialog):
             source, load_defaults()
         )
         self.split_defaults = saved_split_defaults(self.source_settings)
+        self.saved_operation = saved_operation_state(self.source_settings)
+        if reference_face is None and split_sketch is None:
+            (
+                self.reference_face,
+                self.split_sketch,
+                self.reference_object,
+                self.reference_subname,
+                self.reference_kind,
+            ) = _saved_reference(self.source_settings)
         self.setWindowTitle("Split to enclosure")
         self.setMinimumWidth(480)
 
@@ -138,13 +225,13 @@ class EnclosureDialog(QtWidgets.QDialog):
 
         self.plane_mode = QtWidgets.QComboBox()
         self.plane_mode.addItems(["Global XY", "Global XZ", "Global YZ"])
-        if reference_face is not None:
+        if self.reference_face is not None:
             self.plane_mode.addItem("Selected planar face / datum")
             self.plane_mode.setCurrentIndex(3)
-        if split_sketch is not None:
+        if self.split_sketch is not None:
             self.plane_mode.addItem("Selected open sketch")
             self.plane_mode.setCurrentIndex(self.plane_mode.count() - 1)
-        elif reference_face is None:
+        elif self.reference_face is None:
             saved_mode = self.split_defaults.get("plane_mode")
             saved_index = self.plane_mode.findText(saved_mode) if saved_mode else -1
             if saved_index >= 0:
@@ -233,6 +320,9 @@ class EnclosureDialog(QtWidgets.QDialog):
             "contour cycles its side assignment."
         )
         contour_layout.addWidget(self.contour_list)
+        self.persistence_status = QtWidgets.QLabel("")
+        self.persistence_status.setWordWrap(True)
+        contour_layout.addWidget(self.persistence_status)
         legend = QtWidgets.QLabel(
             "<span style='color:#3595ff'>Blue = NEG lip, arrow toward POS</span> &nbsp; "
             "<span style='color:#f0a03a'>Orange = POS lip, arrow toward NEG</span> &nbsp; "
@@ -334,6 +424,14 @@ class EnclosureDialog(QtWidgets.QDialog):
 
     def parameters(self):
         mode, offset, origin, normal = self._plane_parameters()
+        contour_state = None
+        if self._contours and self._contour_sides is not None:
+            contour_state = encode_contour_state(
+                self._contours,
+                self._contour_sides,
+                self._contour_snaps or {},
+            )
+        reference_kind = self.reference_kind if not mode.startswith("Global") else "global"
         return {
             "plane_origin": origin,
             "plane_normal": normal,
@@ -354,8 +452,40 @@ class EnclosureDialog(QtWidgets.QDialog):
             "offset": offset,
             "split_kind": "sketch" if mode == "Selected open sketch" else "plane",
             "split_sketch": self.split_sketch,
+            "reference_kind": reference_kind,
+            "reference_object": (
+                self.reference_object if reference_kind != "global" else None
+            ),
+            "reference_subname": (
+                self.reference_subname if reference_kind == "face" else ""
+            ),
+            "contour_state": contour_state,
             "remember_settings": self.remember_settings.isChecked(),
         }
+
+    def _saved_choices_apply(self, mode, offset):
+        if not self.saved_operation.get("contour_state"):
+            return False
+        saved_kind = self.saved_operation.get("reference_kind", "global")
+        if mode.startswith("Global"):
+            return (
+                saved_kind == "global"
+                and self.saved_operation.get("plane_mode") == mode
+                and abs(float(self.saved_operation.get("offset", 0.0)) - offset)
+                <= 1e-6
+            )
+        if mode == "Selected open sketch":
+            return (
+                saved_kind == "sketch"
+                and self.saved_operation.get("reference_object") == self.split_sketch
+            )
+        return (
+            saved_kind in {"face", "datum"}
+            and self.saved_operation.get("reference_object") == self.reference_object
+            and self.saved_operation.get("reference_subname", "")
+            == self.reference_subname
+            and abs(float(self.saved_operation.get("offset", 0.0)) - offset) <= 1e-6
+        )
 
     def _build_preview(self):
         self._cleanup_preview(clear_list=True)
@@ -375,6 +505,14 @@ class EnclosureDialog(QtWidgets.QDialog):
                 self._preview_split = None
             if not self._contours:
                 raise ValueError("No closed contours were found on this split plane.")
+
+            restored_sides = {}
+            restored_snaps = {}
+            report = None
+            if self._saved_choices_apply(mode, _offset):
+                restored_sides, restored_snaps, report = match_contour_state(
+                    self._contours, self.saved_operation.get("contour_state")
+                )
 
             doc = self.source.Document
             self._preview_group = doc.addObject(
@@ -397,6 +535,8 @@ class EnclosureDialog(QtWidgets.QDialog):
                     if contour.kind == "outer"
                     else "none"
                 )
+                side = restored_sides.get(contour.index, side)
+                snap = restored_snaps.get(contour.index, False)
                 base_label = (
                     "#{:02d}  {:8s}   area {:9.2f} mm2   length {:9.2f} mm".format(
                         contour.index + 1,
@@ -413,7 +553,7 @@ class EnclosureDialog(QtWidgets.QDialog):
                 )
                 item.setData(QtCore.Qt.UserRole, contour.index)
                 item.setData(QtCore.Qt.UserRole + 1, side)
-                item.setData(QtCore.Qt.UserRole + 2, False)
+                item.setData(QtCore.Qt.UserRole + 2, snap)
                 item.setData(QtCore.Qt.UserRole + 3, base_label)
                 self.contour_list.addItem(item)
 
@@ -450,6 +590,25 @@ class EnclosureDialog(QtWidgets.QDialog):
                 self._preview_group.addObject(arrow)
                 self._preview_objects[arrow.Name] = contour.index
                 self._set_contour_side(contour.index, side)
+            if report is not None:
+                skipped = report["missing"] + report["ambiguous"]
+                message = "Restored {} contour choice(s).".format(report["matched"])
+                if skipped:
+                    message += (
+                        " {} changed or ambiguous choice(s) were left at safe defaults."
+                    ).format(skipped)
+                    self.persistence_status.setStyleSheet("color: #d99020")
+                else:
+                    self.persistence_status.setStyleSheet("color: #55a868")
+                self.persistence_status.setText(message)
+            elif self.saved_operation.get("contour_state"):
+                self.persistence_status.setStyleSheet("color: #d99020")
+                self.persistence_status.setText(
+                    "Saved contour choices belong to a different split reference; "
+                    "using safe defaults."
+                )
+            else:
+                self.persistence_status.clear()
             self._updating_checks = False
             doc.recompute()
             if hasattr(Gui, "Selection"):
@@ -661,6 +820,8 @@ def _add_result_to_document(source, result, parameters):
         container.addProperty("App::PropertyLink", "Settings", "Split parameters")
         container.addProperty("App::PropertyString", "PlaneMode", "Split parameters")
         container.addProperty("App::PropertyLink", "SplitSketch", "Split parameters")
+        container.addProperty("App::PropertyLink", "SplitReference", "Split parameters")
+        container.addProperty("App::PropertyString", "ReferenceSubelement", "Split parameters")
         container.addProperty("App::PropertyVector", "PlaneOrigin", "Split parameters")
         container.addProperty("App::PropertyVector", "PlaneNormal", "Split parameters")
         container.addProperty("App::PropertyLength", "PlaneOffset", "Split parameters")
@@ -682,6 +843,8 @@ def _add_result_to_document(source, result, parameters):
         container.Source = source
         container.Settings = settings
         container.SplitSketch = parameters.get("split_sketch")
+        container.SplitReference = parameters.get("reference_object")
+        container.ReferenceSubelement = parameters.get("reference_subname", "")
         container.PlaneMode = parameters["plane_mode"]
         container.PlaneOrigin = parameters["plane_origin"]
         container.PlaneNormal = parameters["plane_normal"]
@@ -758,7 +921,16 @@ def _add_result_to_document(source, result, parameters):
 
 
 def run():
-    source, reference_face, split_sketch = _selection_context()
+    (
+        source,
+        reference_face,
+        split_sketch,
+        reference_object,
+        reference_subname,
+        reference_kind,
+    ) = _selection_details()
+    if source is None and App.ActiveDocument is not None:
+        source, _settings = latest_source_settings(App.ActiveDocument)
     if source is None:
         QtWidgets.QMessageBox.warning(
             Gui.getMainWindow(),
@@ -773,6 +945,9 @@ def run():
         reference_face,
         Gui.getMainWindow(),
         split_sketch=split_sketch,
+        reference_object=reference_object,
+        reference_subname=reference_subname,
+        reference_kind=reference_kind,
     )
     if dialog.exec() != QtWidgets.QDialog.Accepted:
         return
@@ -784,6 +959,10 @@ def run():
         split_kind = engine_parameters.pop("split_kind")
         selected_sketch = engine_parameters.pop("split_sketch")
         engine_parameters.pop("remember_settings")
+        engine_parameters.pop("reference_kind")
+        engine_parameters.pop("reference_object")
+        engine_parameters.pop("reference_subname")
+        engine_parameters.pop("contour_state")
         if split_kind == "sketch":
             plane_origin = engine_parameters.pop("plane_origin")
             sketch_normal = engine_parameters.pop("plane_normal")

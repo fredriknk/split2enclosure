@@ -222,12 +222,20 @@ The next time Split2Enclosure is run for that Body/source, the dialog restores:
 - draft angle;
 - snap seam size, channel clearance, and height fraction;
 - default contour side;
-- global plane mode and plane offset.
+- the last source Body/object, split plane/sketch/datum/face link, and offset;
+- contour NEG/POS/OFF assignments and SNAP toggles.
 
-An explicitly selected sketch, planar face, or datum plane still takes priority
-over a remembered global plane mode. Contour NEG/POS/OFF assignments and SNAP
-toggles are deliberately not persisted because contour indices can change when
-the source topology changes.
+An explicitly selected source, sketch, planar face, or datum plane still takes
+priority over its remembered counterpart. With nothing selected, the command
+reopens the most recently used valid Body/source in the active document.
+
+Contour choices are matched by geometric fingerprints rather than FreeCAD
+edge/face indices. Unchanged contours can therefore survive index reordering.
+After a model edit, only confident one-to-one matches are restored; missing or
+ambiguous contours use the normal safe defaults and the preview displays a
+warning. A remembered face is still a `Link` plus a subelement name such as
+`Face12`, so selecting a datum plane or sketch is more topology-stable when
+either is practical.
 
 The VarSet remains after generated result Parts are deleted and is saved inside
 the project file. It is visible in the model tree and its joint/snap values can
@@ -312,6 +320,8 @@ navigating one monolithic implementation:
   offsets, and planar joint volumes.
 - `_geometry_joint.py` contains shared lip, groove, draft, clearance, snap, and
   final Boolean-pipeline logic.
+- `selection_state.py` fingerprints contours and performs conservative
+  one-to-one restoration of their side/snap choices.
 
 Callers should continue importing from `split2enclosure.geometry`; the private
 modules are implementation details and may evolve independently.
@@ -352,6 +362,16 @@ modules are implementation details and may evolve independently.
 | A joint is interrupted near an existing feature | Remember that source holes and missing material are preserved; try a smaller joint or another contour |
 
 ## Release history
+
+### v0.6.0
+
+- Added document-local links for the last source and split sketch, datum, or
+  planar face; running with no selection restores the most recently used valid
+  source.
+- Added versioned geometric contour fingerprints so NEG/POS/OFF and SNAP
+  choices survive safe topology reordering.
+- Ambiguous, missing, or substantially changed contours are never guessed;
+  they remain at safe defaults with a visible preview warning.
 
 ### v0.5.2
 
@@ -424,6 +444,8 @@ Run the headless regression suite with the matching FreeCAD executable:
 
 ```powershell
 & 'C:\Program Files\FreeCAD 1.1\bin\FreeCADCmd.exe' 'tests\run_geometry_tests.py'
+& 'C:\Program Files\FreeCAD 1.1\bin\FreeCADCmd.exe' 'tests\run_settings_tests.py'
+& 'C:\Program Files\FreeCAD 1.1\bin\FreeCADCmd.exe' 'tests\run_selection_state_tests.py'
 ```
 
 Run the headless GUI-module/dialog smoke test with:

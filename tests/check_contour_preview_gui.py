@@ -20,7 +20,12 @@ def run_check():
             if name == "split2enclosure" or name.startswith("split2enclosure."):
                 del sys.modules[name]
         sys.path.insert(0, PROJECT_ROOT)
-        from split2enclosure.command import EnclosureDialog, _selection_context
+        from split2enclosure.command import (
+            EnclosureDialog,
+            _selection_context,
+            _selection_details,
+        )
+        from split2enclosure.settings import save_source_defaults
 
         doc = App.newDocument("Split2EnclosurePreviewCheck")
         outer = Part.makeBox(40, 30, 20)
@@ -85,6 +90,44 @@ def run_check():
         assert snaps[1]
         assert doc.getObject("Split2EnclosurePreview") is None
 
+        saved_parameters = dialog.parameters()
+        assert saved_parameters["contour_state"]
+        save_source_defaults(source, saved_parameters)
+        restored_dialog = EnclosureDialog(source, None, Gui.getMainWindow())
+        QtWidgets.QMessageBox.warning = fail_warning
+        try:
+            restored_dialog._build_preview()
+        finally:
+            QtWidgets.QMessageBox.warning = original_warning
+        restored = {
+            int(restored_dialog.contour_list.item(row).data(QtCore.Qt.UserRole)):
+            (
+                str(
+                    restored_dialog.contour_list.item(row).data(
+                        QtCore.Qt.UserRole + 1
+                    )
+                ),
+                bool(
+                    restored_dialog.contour_list.item(row).data(
+                        QtCore.Qt.UserRole + 2
+                    )
+                ),
+            )
+            for row in range(restored_dialog.contour_list.count())
+        }
+        assert restored[0] == ("positive", True)
+        assert restored[1] == ("positive", True)
+        assert "Restored 3 contour choice(s)" in restored_dialog.persistence_status.text()
+        restored_dialog.reject()
+
+        Gui.Selection.clearSelection()
+        Gui.Selection.addSelection(source, "Face1")
+        details = _selection_details()
+        assert details[0] == source
+        assert details[3] == source
+        assert details[4] == "Face1"
+        assert details[5] == "face"
+
         sketch = doc.addObject("Sketcher::SketchObject", "SplitPath")
         sketch.addGeometry(
             [
@@ -125,6 +168,7 @@ def run_check():
 
         print("SPLIT2ENCLOSURE_CONTOUR_PREVIEW_OK")
         dialog.deleteLater()
+        restored_dialog.deleteLater()
         sketch_dialog.deleteLater()
         App.closeDocument(doc.Name)
     except Exception:

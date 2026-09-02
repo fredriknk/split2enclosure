@@ -14,8 +14,10 @@ if PROJECT_ROOT not in sys.path:
 from split2enclosure.config import DEFAULTS
 from split2enclosure.settings import (
     find_source_settings,
+    latest_source_settings,
     load_source_defaults,
     save_source_defaults,
+    saved_operation_state,
     saved_split_defaults,
     settings_owner,
 )
@@ -99,6 +101,49 @@ class SourceSettingsTests(unittest.TestCase):
             loaded, _found = load_source_defaults(reopened_source, DEFAULTS)
             self.assertAlmostEqual(loaded["lip_height"], 3.25)
             self.assertEqual(loaded["default_lip_side"], "positive")
+
+    def test_reference_links_and_latest_source_are_persisted(self):
+        document = App.newDocument("Split2EnclosureSettingsLinks")
+        source = document.addObject("Part::Feature", "Source")
+        source.Shape = Part.makeBox(10, 10, 10)
+        sketch = document.addObject("Part::Feature", "SplitPath")
+        sketch.Shape = Part.makePolygon(
+            [App.Vector(-1, 5, 0), App.Vector(11, 5, 0)]
+        )
+        values = parameters(
+            plane_mode="Selected open sketch",
+            offset=0.0,
+            reference_kind="sketch",
+            reference_object=sketch,
+            reference_subname="",
+            contour_state='{"version":1,"contours":[]}',
+        )
+
+        settings = save_source_defaults(source, values)
+        state = saved_operation_state(settings)
+        latest_source, latest_settings = latest_source_settings(document)
+
+        self.assertEqual(settings.SchemaVersion, 2)
+        self.assertIs(state["reference_object"], sketch)
+        self.assertEqual(state["reference_kind"], "sketch")
+        self.assertEqual(state["contour_state"], values["contour_state"])
+        self.assertIs(latest_source, source)
+        self.assertIs(latest_settings, settings)
+
+        save_source_defaults(
+            source,
+            parameters(
+                plane_mode="Selected open sketch",
+                offset=0.0,
+                reference_kind="sketch",
+                reference_object=sketch,
+                reference_subname="",
+            ),
+        )
+        self.assertEqual(saved_operation_state(settings)["contour_state"], values["contour_state"])
+
+        save_source_defaults(source, parameters(plane_mode="Global XY", offset=5.0))
+        self.assertEqual(saved_operation_state(settings)["contour_state"], "")
 
 
 suite = unittest.defaultTestLoader.loadTestsFromTestCase(SourceSettingsTests)

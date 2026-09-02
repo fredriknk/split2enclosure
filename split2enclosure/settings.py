@@ -6,7 +6,7 @@ from .config import DEFAULTS, validate_defaults
 
 
 SETTINGS_MARKER = "Split2Enclosure.SourceDefaults"
-SETTINGS_SCHEMA_VERSION = 1
+SETTINGS_SCHEMA_VERSION = 2
 
 _VALUE_PROPERTIES = (
     ("lip_width", "LipWidth", "App::PropertyLength", "Joint defaults"),
@@ -127,12 +127,6 @@ def save_source_defaults(source, parameters):
             "DefaultLipSide",
             "Joint defaults",
         )
-        settings.addProperty(
-            "App::PropertyString", "PlaneMode", "Split defaults"
-        )
-        settings.addProperty(
-            "App::PropertyLength", "PlaneOffset", "Split defaults"
-        )
         settings.SettingsType = SETTINGS_MARKER
         settings.SchemaVersion = SETTINGS_SCHEMA_VERSION
         settings.Source = owner
@@ -141,14 +135,133 @@ def save_source_defaults(source, parameters):
         settings.setEditorMode("SchemaVersion", 1)
         settings.setEditorMode("Source", 1)
 
+    _ensure_operation_properties(settings)
+    previous_operation = saved_operation_state(settings)
+
     for key, property_name, _property_type, _group in _VALUE_PROPERTIES:
         setattr(settings, property_name, values[key])
     settings.DefaultLipSide = values["default_lip_side"]
-    settings.PlaneMode = str(parameters.get("plane_mode", "Global XY"))
-    settings.PlaneOffset = float(parameters.get("offset", 0.0))
+    plane_mode = str(parameters.get("plane_mode", "Global XY"))
+    plane_offset = float(parameters.get("offset", 0.0))
+    reference_kind = str(parameters.get("reference_kind", "global"))
+    reference_object = parameters.get("reference_object")
+    reference_subname = str(parameters.get("reference_subname", ""))
+    settings.PlaneMode = plane_mode
+    settings.PlaneOffset = plane_offset
+    settings.ReferenceKind = reference_kind
+    settings.SplitReference = reference_object
+    settings.ReferenceSubelement = reference_subname
+    contour_state = parameters.get("contour_state")
+    if contour_state is not None:
+        settings.ContourState = str(contour_state)
+    elif not _same_reference(
+        previous_operation,
+        plane_mode,
+        plane_offset,
+        reference_kind,
+        reference_object,
+        reference_subname,
+    ):
+        settings.ContourState = ""
+    settings.LastUsedSequence = _next_sequence(owner.Document)
     settings.SchemaVersion = SETTINGS_SCHEMA_VERSION
     owner.Document.recompute()
     return settings
+
+
+def _add_property(settings, property_type, name, group):
+    if name not in getattr(settings, "PropertiesList", []):
+        settings.addProperty(property_type, name, group)
+
+
+def _ensure_operation_properties(settings):
+    """Upgrade older source VarSets in place without invalidating them."""
+
+    _add_property(settings, "App::PropertyString", "PlaneMode", "Split defaults")
+    _add_property(settings, "App::PropertyLength", "PlaneOffset", "Split defaults")
+    _add_property(settings, "App::PropertyString", "ReferenceKind", "Split reference")
+    _add_property(settings, "App::PropertyLink", "SplitReference", "Split reference")
+    _add_property(
+        settings, "App::PropertyString", "ReferenceSubelement", "Split reference"
+    )
+    _add_property(settings, "App::PropertyString", "ContourState", "Contour choices")
+    _add_property(settings, "App::PropertyInteger", "LastUsedSequence", "Split2Enclosure")
+
+
+def _next_sequence(document):
+    sequence = 0
+    for obj in document.Objects:
+        if getattr(obj, "TypeId", "") != "App::VarSet":
+            continue
+        if getattr(obj, "SettingsType", "") != SETTINGS_MARKER:
+            continue
+        try:
+            sequence = max(sequence, int(obj.LastUsedSequence))
+        except (AttributeError, TypeError, ValueError):
+            pass
+    return sequence + 1
+
+
+def _same_reference(
+    previous, plane_mode, plane_offset, kind, reference_object, reference_subname
+):
+    if previous.get("reference_kind", "global") != kind:
+        return False
+    if kind == "global":
+        return (
+            previous.get("plane_mode") == plane_mode
+            and abs(float(previous.get("offset", 0.0)) - plane_offset) <= 1e-6
+        )
+    if previous.get("reference_object") != reference_object:
+        return False
+    if kind == "face" and previous.get("reference_subname", "") != reference_subname:
+        return False
+    if kind in {"face", "datum"}:
+        return abs(float(previous.get("offset", 0.0)) - plane_offset) <= 1e-6
+    return True
+
+
+def latest_source_settings(document):
+    """Return the most recently used valid source and its settings VarSet."""
+
+    candidates = []
+    for position, obj in enumerate(document.Objects):
+        if getattr(obj, "TypeId", "") != "App::VarSet":
+            continue
+        if getattr(obj, "SettingsType", "") != SETTINGS_MARKER:
+            continue
+        source = getattr(obj, "Source", None)
+        shape = getattr(source, "Shape", None)
+        if source is None or shape is None or shape.isNull() or not shape.Solids:
+            continue
+        try:
+            sequence = int(obj.LastUsedSequence)
+        except (AttributeError, TypeError, ValueError):
+            sequence = 0
+        candidates.append((sequence, position, source, obj))
+    if not candidates:
+        return None, None
+    _sequence, _position, source, settings = max(candidates)
+    return source, settings
+
+
+def saved_operation_state(settings):
+    """Return persisted reference links and contour data when still available."""
+
+    if settings is None:
+        return {}
+    result = saved_split_defaults(settings)
+    result.update(
+        {
+            "reference_kind": str(getattr(settings, "ReferenceKind", "global")),
+            "reference_object": getattr(settings, "SplitReference", None),
+            "reference_subname": str(
+                getattr(settings, "ReferenceSubelement", "")
+            ),
+            "contour_state": str(getattr(settings, "ContourState", "")),
+        }
+    )
+    return result
 
 
 def saved_split_defaults(settings):
