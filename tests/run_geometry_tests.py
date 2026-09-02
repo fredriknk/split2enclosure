@@ -15,6 +15,7 @@ if not os.environ.get("SPLIT2ENCLOSURE_TEST_INSTALLED") and PROJECT_ROOT not in 
     sys.path.insert(0, PROJECT_ROOT)
 
 from split2enclosure.geometry import (
+    _joint_section,
     _safe_refine,
     analyze_section_contours,
     analyze_sketch_contours,
@@ -308,6 +309,7 @@ class GeometryTests(unittest.TestCase):
                 lip_height=2.0,
                 clearance=0.2,
                 vertical_clearance=0.2,
+                draft_angle=5.0,
                 contour_sides={0: "negative"},
             )
             self.assert_valid_pair(source, result)
@@ -320,6 +322,14 @@ class GeometryTests(unittest.TestCase):
                 direction,
                 2.0,
             )
+            lower_cap = _joint_section(
+                result.section, result.groove, direction, 2.05
+            )
+            upper_cap = _joint_section(
+                result.section, result.groove, direction, 2.15
+            )
+            self.assertGreater(lower_cap.Area, 0.0)
+            self.assertAlmostEqual(lower_cap.Area, upper_cap.Area, places=4)
             for distance in (0.05, 0.2, 0.5, 1.0, 2.0, 2.2, 3.0, 5.0):
                 moving_half = result.negative.copy()
                 moving_half.translate(-direction * distance)
@@ -359,6 +369,48 @@ class GeometryTests(unittest.TestCase):
         self.assert_valid_pair(source, drafted)
         self.assertLess(drafted.lip.Volume, straight.lip.Volume)
         self.assertNotAlmostEqual(drafted.lip.Volume, straight.lip.Volume, places=3)
+
+    def test_drafted_outer_groove_keeps_side_and_tip_clearance(self):
+        source = hollow_box(open_top=False)
+        origin, normal = plane_from_axes("XY", 10)
+        lip_height = 2.0
+        vertical_clearance = 0.3
+        drafted = make_enclosure(
+            source,
+            origin,
+            normal,
+            lip_width=1.0,
+            lip_height=lip_height,
+            clearance=0.25,
+            vertical_clearance=vertical_clearance,
+            draft_angle=5.0,
+            contour_mode="outer",
+        )
+
+        # The drafted portion ends at the lip tip. Above that point the groove
+        # must retain the same footprint instead of continuing to taper inward.
+        lower_cap = _joint_section(
+            drafted.section, drafted.groove, normal, lip_height + 0.05
+        )
+        upper_cap = _joint_section(
+            drafted.section,
+            drafted.groove,
+            normal,
+            lip_height + vertical_clearance - 0.05,
+        )
+        self.assertGreater(lower_cap.Area, 0.0)
+        self.assertAlmostEqual(lower_cap.Area, upper_cap.Area, places=5)
+
+        # Sample through the outer wall: the side gap survives at the drafted
+        # tip, and the receiver stays clear above the lip until the cap ends.
+        side_gap = App.Vector(0.95, 15.0, 11.99)
+        tip_gap = App.Vector(0.4, 15.0, 12.15)
+        above_gap = App.Vector(0.4, 15.0, 12.35)
+        self.assertFalse(drafted.negative.isInside(side_gap, 1e-6, True))
+        self.assertFalse(drafted.positive.isInside(side_gap, 1e-6, True))
+        self.assertFalse(drafted.negative.isInside(tip_gap, 1e-6, True))
+        self.assertFalse(drafted.positive.isInside(tip_gap, 1e-6, True))
+        self.assertTrue(drafted.positive.isInside(above_gap, 1e-6, True))
 
     def test_optional_draft_works_on_ruled_sketch_panels(self):
         outer = Part.makeBox(40, 30, 20, App.Vector(-20, -15, -10))

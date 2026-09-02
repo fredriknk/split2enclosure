@@ -195,10 +195,11 @@ joint facing upward in the slicer to obtain the intended 45-degree printing
 overhang. Snap retention is continuous around each enabled contour; localized
 or segmented snaps are not yet available.
 
-Draft must also leave positive-width tip footprints. In practical terms,
-`tan(draft) * lip height` must remain below the lip width, and
-`tan(draft) * (lip height + depth clearance)` must remain below
-`lip width + side clearance`. Reduce the angle on narrow or tall joints.
+Draft must also leave a positive-width lip-tip footprint. In practical terms,
+`tan(draft) * lip height` must remain below the lip width. The groove tapers
+beside the lip over that same height, retaining the configured side clearance,
+then continues straight through the depth-clearance region above the tip. This
+keeps the groove from tapering back into the lip on outer perimeters.
 
 ## Per-Body and project defaults
 
@@ -326,6 +327,17 @@ derived directly from the final solid.
 | A joint is interrupted near an existing feature | Remember that source holes and missing material are preserved; try a smaller joint or another contour |
 
 ## Release history
+
+### v0.5.1
+
+- Drafted grooves now stop tapering at the lip tip and continue with a straight
+  clearance cap, preserving both side and depth clearance on outer perimeters.
+- Added cross-section regression coverage for drafted external joints.
+
+### v0.5.0
+
+- Added document-local `App::VarSet` defaults associated with each selected
+  Body or source object, including automatic dialog restore on the next run.
 
 ### v0.4.3
 

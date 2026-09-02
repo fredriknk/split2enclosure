@@ -995,9 +995,8 @@ def _ruled_joint_volumes(
         if lip_band.isNull() or not lip_band.Faces:
             continue
         draft_slope = math.tan(math.radians(draft_angle))
-        groove_depth = lip_height + vertical_clearance
         top_lip_width = lip_width - draft_slope * lip_height
-        top_groove_width = lip_width + clearance - draft_slope * groove_depth
+        top_groove_width = top_lip_width + clearance
         if top_lip_width <= tolerance or top_groove_width <= tolerance:
             raise ValueError(
                 "Draft angle is too large for the requested lip width and height."
@@ -1016,13 +1015,15 @@ def _ruled_joint_volumes(
         ).common(receiver)
         if lip_piece.isNull() or not lip_piece.Solids:
             continue
-        groove_piece = _drafted_extrusion(
+        groove_piece = _drafted_groove(
             groove_band,
             top_groove_band,
-            direction * (groove_depth + tolerance * 2),
+            direction,
+            lip_height,
+            vertical_clearance,
             draft_angle,
+            tolerance,
         )
-        groove_piece.translate(-direction * tolerance)
         if vertical_clearance > tolerance:
             section_material = _combine_faces(section_faces)
             root_band = section_material.cut(lip_band)
@@ -1635,6 +1636,40 @@ def _drafted_extrusion(bottom, top, vector, draft_angle):
     return _fuse_shapes(solids)
 
 
+def _drafted_groove(
+    bottom,
+    lip_height_footprint,
+    direction,
+    lip_height,
+    vertical_clearance,
+    draft_angle,
+    tolerance,
+):
+    """Draft beside the lip, then keep its tip clearance straight above it.
+
+    Extending the taper through ``vertical_clearance`` narrows the groove above
+    the lip. On an outer perimeter that can make the receiver touch the lip's
+    drafted tip. The clearance portion must instead retain the cross-section
+    reached at the actual lip height.
+    """
+
+    drafted = _drafted_extrusion(
+        bottom,
+        lip_height_footprint,
+        direction * lip_height,
+        draft_angle,
+    )
+    cap_footprint = lip_height_footprint.copy()
+    cap_footprint.translate(direction * lip_height)
+    cap = _extrude_faces(
+        cap_footprint,
+        direction * (vertical_clearance + tolerance * 2),
+    )
+    groove = _fuse_shapes([drafted, cap])
+    groove.translate(-direction * tolerance)
+    return groove
+
+
 def _plane_joint_volumes(
     section,
     wires,
@@ -1655,10 +1690,8 @@ def _plane_joint_volumes(
     direction = normal if lip_on == "negative" else -normal
     receiver = positive_half if lip_on == "negative" else negative_half
     draft_slope = math.tan(math.radians(draft_angle))
-    groove_depth = lip_height + vertical_clearance
     top_lip_width = lip_width - draft_slope * lip_height
-    top_groove_lip_width = lip_width - draft_slope * groove_depth
-    if top_lip_width <= tolerance or top_groove_lip_width + clearance <= tolerance:
+    if top_lip_width <= tolerance or top_lip_width + clearance <= tolerance:
         raise ValueError(
             "Draft angle is too large for the requested lip width and height."
         )
@@ -1666,7 +1699,7 @@ def _plane_joint_volumes(
         section, wires, top_lip_width, clearance, tolerance
     )
     _unused, top_groove_footprint = _joint_footprints(
-        section, wires, top_groove_lip_width, clearance, tolerance
+        section, wires, top_lip_width, clearance, tolerance
     )
     raw_lip = _drafted_extrusion(
         lip_footprint,
@@ -1680,13 +1713,15 @@ def _plane_joint_volumes(
             "The receiving half contains no material inside the requested lip region."
         )
 
-    groove = _drafted_extrusion(
+    groove = _drafted_groove(
         groove_footprint,
         top_groove_footprint,
-        direction * (lip_height + vertical_clearance + tolerance * 2),
+        direction,
+        lip_height,
+        vertical_clearance,
         draft_angle,
+        tolerance,
     )
-    groove.translate(-direction * tolerance)
 
     root_clearance = Part.Shape()
     if vertical_clearance > tolerance:
