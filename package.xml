@@ -4,7 +4,6 @@
     <description>Split solids with planes or open sketches and add matched lip-and-groove enclosure joints.</description>
     <tag>3d-printing</tag>
     <tag>enclosure</tag>
-    <tag>modeling</tag>
     <tag>parametric</tag>
     <tag>workbench</tag>
     <icon>Resources/icons/split2enclosure.svg</icon>
