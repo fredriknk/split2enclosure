@@ -31,6 +31,8 @@ def run_check():
         doc.recompute()
 
         dialog = EnclosureDialog(source, None, Gui.getMainWindow())
+        assert dialog.remember_settings.isChecked()
+        assert source.Label in dialog.remember_settings.text()
         dialog.offset.setValue(10.0)
         original_warning = QtWidgets.QMessageBox.warning
 

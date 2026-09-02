@@ -58,7 +58,8 @@ Split2Enclosure takes a solid like this and:
    **NEG**, **OFF**, or **POS**, to choose the lip owner.
 7. Optionally select rows and press **SNAP** to add continuous, printable
    45-degree wedge seams and matching channels around those perimeters.
-8. Set lip dimensions, clearances, and optional draft.
+8. Set lip dimensions, clearances, and optional draft. Leave **Remember
+   settings for** enabled to save them with this Body/source.
 9. Press **Create**.
 
 The original solid is left untouched. Split2Enclosure creates two new
@@ -199,7 +200,41 @@ Draft must also leave positive-width tip footprints. In practical terms,
 `tan(draft) * (lip height + depth clearance)` must remain below
 `lip width + side clearance`. Reduce the angle on narrow or tall joints.
 
-## Configurable defaults
+## Per-Body and project defaults
+
+The dialog's **Remember settings for** checkbox is enabled by default. After a
+successful Create, Split2Enclosure creates or updates an `App::VarSet` named
+`Enclosure defaults — <Body>` inside the `.FCStd` document. If the selected
+source belongs to a Part Design Body, the VarSet is linked to that Body;
+otherwise it is linked to the selected source object.
+
+The next time Split2Enclosure is run for that Body/source, the dialog restores:
+
+- lip width and height;
+- side and depth clearances;
+- draft angle;
+- snap seam size, channel clearance, and height fraction;
+- default contour side;
+- global plane mode and plane offset.
+
+An explicitly selected sketch, planar face, or datum plane still takes priority
+over a remembered global plane mode. Contour NEG/POS/OFF assignments and SNAP
+toggles are deliberately not persisted because contour indices can change when
+the source topology changes.
+
+The VarSet remains after generated result Parts are deleted and is saved inside
+the project file. It is visible in the model tree and its joint/snap values can
+also be edited directly in FreeCAD's Property editor. Clearing **Remember
+settings for** prevents the current run from updating or creating the VarSet;
+it does not delete an existing one.
+
+Defaults are resolved in this order:
+
+```text
+Body/source VarSet → global JSON file → built-in defaults
+```
+
+## Global configurable defaults
 
 Edit [`split2enclosure_defaults.json`](split2enclosure_defaults.json) in the
 add-on's root directory to change the values used whenever the dialog opens.

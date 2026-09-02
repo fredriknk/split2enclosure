@@ -2,8 +2,6 @@
 
 import warnings
 
-import FreeCAD as App
-
 from .config import DEFAULTS, validate_defaults
 
 
