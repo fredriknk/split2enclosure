@@ -441,4 +441,4 @@ Split2Enclosure is released under the [MIT License](LICENSE).
 
 ## Disclaimer
 
-A substantial amount of this code is made with ChatGPT, and I am a hobbyist who needed this functionality. I am not a professional software developer. Remember to have backups of your design before you use this plugin. Use at your own risk.
+A substantial amount of this code is made with ChatGPT. I am a hobbyist who needed this functionality. I am not a professional software developer. Remember to have backups of your design before you use this plugin. Use at your own risk.
