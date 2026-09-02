@@ -2,22 +2,31 @@
 <package format="1" xmlns="https://wiki.freecad.org/Package_Metadata">
     <name>Split2Enclosure</name>
     <description>Split solids with planes or open sketches and add matched lip-and-groove enclosure joints.</description>
+    <tag>3d-printing</tag>
+    <tag>enclosure</tag>
+    <tag>modeling</tag>
+    <tag>parametric</tag>
+    <tag>workbench</tag>
     <icon>Resources/icons/split2enclosure.svg</icon>
+
     <version>0.6.0</version>
     <date>2026-09-02</date>
-    <maintainer>Split2Enclosure contributors</maintainer>
+
+    <maintainer>FredrikNB</maintainer>
+
+    <freecadmin>1.1.0</freecadmin>
+
     <license file="LICENSE">MIT</license>
+
     <url type="repository" branch="main">https://github.com/fredriknk/split2enclosure</url>
     <url type="bugtracker">https://github.com/fredriknk/split2enclosure/issues</url>
     <url type="readme">https://github.com/fredriknk/split2enclosure/blob/main/README.md</url>
+
     <content>
         <workbench>
             <name>Split2Enclosure</name>
+            <classname>Split2EnclosureWorkbench</classname>
             <subdirectory>./</subdirectory>
         </workbench>
-        <macro>
-            <name>Split2Enclosure</name>
-            <subdirectory>./</subdirectory>
-        </macro>
     </content>
 </package>
