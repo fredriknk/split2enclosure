@@ -45,6 +45,42 @@ Split2Enclosure takes a solid like this and:
 </tr>
 </table>
 
+### Examples of splits you can create
+<table>
+<tr>
+<td width="25%">
+
+**Straight lids**
+
+<img src="media/Straight_split.png" width="100%">
+
+</td>
+<td width="25%">
+
+**Snap lids**
+
+<img src="media/snap_split.png" width="100%">
+
+</td>
+<td width="25%">
+
+**Chamfered Lid**
+
+<img src="media/Chamfered_Split.png" width="100%">
+
+</td>
+<td width="25">
+
+**Chamfered Snap**
+
+<img src="media/Chamfered_snap_split.png" width="100%">
+
+</td>
+</tr>
+
+</table>
+
+
 ## Quick start
 
 1. Select the solid you want to split.
@@ -361,68 +397,6 @@ modules are implementation details and may evolve independently.
 | A snap transition is too large or changes topology | Use the fit rules above; reduce snap size/clearance or move its fraction toward `0.5` |
 | A joint is interrupted near an existing feature | Remember that source holes and missing material are preserved; try a smaller joint or another contour |
 
-## Release history
-
-### v0.6.0
-
-- Added document-local links for the last source and split sketch, datum, or
-  planar face; running with no selection restores the most recently used valid
-  source.
-- Added versioned geometric contour fingerprints so NEG/POS/OFF and SNAP
-  choices survive safe topology reordering.
-- Ambiguous, missing, or substantially changed contours are never guessed;
-  they remain at safe defaults with a visible preview warning.
-
-### v0.5.2
-
-- Drafted planar lips and grooves are constructed before wall clipping, so one
-  locally thin wall can no longer collapse side or tip clearance around the
-  rest of a perimeter.
-- Snap seams are clipped to supporting source material after construction;
-  unsupported thin-wall portions are omitted instead of rejecting the entire
-  contour.
-- Added a thin-wall warning and regression coverage for mixed 1 mm/2 mm walls
-  split on the global XZ plane.
-
-### v0.5.1
-
-- Drafted grooves now stop tapering at the lip tip and continue with a straight
-  clearance cap, preserving both side and depth clearance on outer perimeters.
-- Added cross-section regression coverage for drafted external joints.
-
-### v0.5.0
-
-- Added document-local `App::VarSet` defaults associated with each selected
-  Body or source object, including automatic dialog restore on the next run.
-
-### v0.4.3
-
-- Sketch paths once again control only the split location. Lips, grooves,
-  shoulder reliefs, and snap channels use one global principal assembly axis,
-  including on straight diagonal sketches.
-- The fitted/slanted mating direction introduced in v0.4.2 was removed because
-  it could clip and break otherwise simple outer lips on complex sketch paths.
-- Regression coverage verifies the complete selected outer contour from lip
-  root to tip and collision-free straight separation of the supplied Splitbox
-  halves along their selected assembly axis.
-
-### v0.4.2
-
-- Snap seams use printable 45-degree wedge faces with clearance-matched channels.
-- Depth clearance now applies equally at the lip tip and flat mating shoulders.
-- Coplanar sketch-section fragments are merged before offsetting to prevent
-  topology-only breaks. The fitted-direction experiment in this version was
-  superseded by the global principal-axis behavior in v0.4.3.
-- `examples/Splitbox_test.FCStd` is covered by the geometry regression suite.
-
-### v0.4.1
-
-- Sketch seams use one global extrusion axis instead of changing direction at
-  every polyline panel.
-- The former recess beneath the tongue root was removed. From v0.4.2 onward,
-  depth clearance instead relieves the non-lip shoulder while the lip root
-  remains attached at the original split.
-- Point dimples were replaced by continuous perimeter snap ribs and channels.
 
 ## Tests and sample
 
@@ -467,6 +441,4 @@ Split2Enclosure is released under the [MIT License](LICENSE).
 
 ## Disclaimer
 
-This work is made with OpenAI Codex, and I am a hobbyist who needed this
-functionality. I am not a professional software developer. Use at your own
-risk.
+A substantial amount of this code is made with ChatGPT, and I am a hobbyist who needed this functionality. I am not a professional software developer. Remember to have backups of your design before you use this plugin. Use at your own risk.
