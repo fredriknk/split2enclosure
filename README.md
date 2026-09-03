@@ -69,7 +69,7 @@ Split2Enclosure takes a solid like this and:
 <img src="media/Chamfered_Split.png" width="100%">
 
 </td>
-<td width="25">
+<td width="25%">
 
 **Chamfered Snap**
 
@@ -140,14 +140,21 @@ Booleans. Changing the plane mode or offset clears the assignments, so press
 all outer contours use the default side, all internal contours stay off, and
 no snap seams are generated.
 
-## Install
+## Manual Install
 
 Clone or copy the complete repository folder into FreeCAD's user `Mod`
-directory. On a typical Windows FreeCAD 1.1 installation it is:
+directory. On a typical Windows FreeCAD 1.1 installation it is most likely found at:
 
 ```text
 %APPDATA%\FreeCAD\v1-1\Mod\Split2Enclosure
 ```
+or
+
+```text
+%APPDATA%\Roaming\FreeCAD\v1-1\Mod\Split2Enclosure
+```
+
+You can find the exact path in FreeCAD's **Tools > Addon Manager > Settings > Open Addons Folder**
 
 Restart FreeCAD and select the **Split2Enclosure** workbench. Keep the whole
 folder together; `Split2Enclosure.FCMacro` is only a launcher for the installed
