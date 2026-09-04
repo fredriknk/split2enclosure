@@ -10,8 +10,8 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from split2enclosure._geometry_types import ContourInfo
-from split2enclosure.selection_state import encode_contour_state, match_contour_state
+from freecad.Split2Enclosure._geometry_types import ContourInfo
+from freecad.Split2Enclosure.selection_state import encode_contour_state, match_contour_state
 
 
 def rectangle(index, x, y, width=10.0, height=6.0, kind="outer"):

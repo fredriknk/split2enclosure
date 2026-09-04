@@ -17,15 +17,17 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 def run_check():
     try:
         for name in list(sys.modules):
-            if name == "split2enclosure" or name.startswith("split2enclosure."):
+            if name == "freecad.Split2Enclosure" or name.startswith(
+                "freecad.Split2Enclosure."
+            ):
                 del sys.modules[name]
         sys.path.insert(0, PROJECT_ROOT)
-        from split2enclosure.command import (
+        from freecad.Split2Enclosure.command import (
             EnclosureDialog,
             _selection_context,
             _selection_details,
         )
-        from split2enclosure.settings import save_source_defaults
+        from freecad.Split2Enclosure.settings import save_source_defaults
 
         doc = App.newDocument("Split2EnclosurePreviewCheck")
         outer = Part.makeBox(40, 30, 20)

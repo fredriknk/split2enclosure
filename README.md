@@ -140,7 +140,23 @@ Booleans. Changing the plane mode or offset clears the assignments, so press
 all outer contours use the default side, all internal contours stay off, and
 no snap seams are generated.
 
-## Manual Install
+## Requirements
+
+- FreeCAD 1.1 or newer.
+- The Part workbench/module.
+- Shapely. The Addon Manager installs this allowed Python dependency when it
+  is not already supplied by the FreeCAD distribution.
+
+## Install with Addon Manager
+
+Once Split2Enclosure is listed in the official FreeCAD Addon Index:
+
+1. Open **Tools > Addon Manager**.
+2. Search for **Split2Enclosure**.
+3. Select it and click **Install**.
+4. Restart FreeCAD, then select the **Split2Enclosure** workbench.
+
+## Manual install
 
 Clone or copy the complete repository folder into FreeCAD's user `Mod`
 directory. On a typical Windows FreeCAD 1.1 installation it is most likely found at:
@@ -353,7 +369,8 @@ derived directly from the final solid.
 The geometry engine is divided by responsibility so changes do not require
 navigating one monolithic implementation:
 
-- `geometry.py` is the stable public API and compatibility facade.
+- `freecad/Split2Enclosure/geometry.py` is the stable public API and
+  compatibility facade.
 - `_geometry_types.py` contains result and build-state data structures.
 - `_geometry_common.py` contains low-level vectors, faces, and robust Boolean
   operations.
@@ -366,7 +383,7 @@ navigating one monolithic implementation:
 - `selection_state.py` fingerprints contours and performs conservative
   one-to-one restoration of their side/snap choices.
 
-Callers should continue importing from `split2enclosure.geometry`; the private
+Callers should import from `freecad.Split2Enclosure.geometry`; the private
 modules are implementation details and may evolve independently.
 
 ## Current limitations
@@ -445,6 +462,13 @@ The two interactive GUI checks launch FreeCAD and close it automatically:
 ## License
 
 Split2Enclosure is released under the [MIT License](LICENSE).
+
+## Privacy and security
+
+Split2Enclosure makes no network connections and sends no user or model data
+to third parties. It reads the optional local defaults JSON file and, when
+requested, stores settings inside the active FreeCAD document. Please report
+security issues using the instructions in [SECURITY.md](SECURITY.md).
 
 ## Disclaimer
 

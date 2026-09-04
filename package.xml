@@ -9,9 +9,9 @@
     <icon>Resources/icons/split2enclosure.svg</icon>
 
     <version>0.6.0</version>
-    <date>2026-09-02</date>
+    <date>2026-09-03</date>
 
-    <maintainer>FredrikNB</maintainer>
+    <maintainer email="fredriknk@users.noreply.github.com">Fredrik Beilegaard</maintainer>
 
     <freecadmin>1.1.0</freecadmin>
 
@@ -19,13 +19,14 @@
 
     <url type="repository" branch="main">https://github.com/fredriknk/split2enclosure</url>
     <url type="bugtracker">https://github.com/fredriknk/split2enclosure/issues</url>
-    <url type="readme">https://github.com/fredriknk/split2enclosure/blob/main/README.md</url>
+    <url type="readme">https://raw.githubusercontent.com/fredriknk/split2enclosure/main/README.md</url>
+
+    <depend type="internal">part</depend>
+    <depend type="python">shapely</depend>
 
     <content>
         <workbench>
-            <name>Split2Enclosure</name>
             <classname>Split2EnclosureWorkbench</classname>
-            <subdirectory>./</subdirectory>
         </workbench>
     </content>
 </package>

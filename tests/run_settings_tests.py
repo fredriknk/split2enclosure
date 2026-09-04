@@ -11,8 +11,8 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from split2enclosure.config import DEFAULTS
-from split2enclosure.settings import (
+from freecad.Split2Enclosure.config import DEFAULTS
+from freecad.Split2Enclosure.settings import (
     find_source_settings,
     latest_source_settings,
     load_source_defaults,

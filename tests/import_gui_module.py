@@ -11,8 +11,8 @@ import FreeCAD as App
 import Part
 from PySide import QtWidgets
 
-from split2enclosure.command import EnclosureDialog
-from split2enclosure.settings import save_source_defaults
+from freecad.Split2Enclosure.command import EnclosureDialog
+from freecad.Split2Enclosure.settings import save_source_defaults
 
 application = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
 document = App.newDocument("Split2EnclosureGuiSmoke")

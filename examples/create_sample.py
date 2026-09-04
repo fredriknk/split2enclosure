@@ -10,7 +10,7 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from split2enclosure.geometry import make_enclosure, plane_from_axes
+from freecad.Split2Enclosure.geometry import make_enclosure, plane_from_axes
 
 
 doc = App.newDocument("Split2EnclosureSample")

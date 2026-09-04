@@ -3,3 +3,4 @@ __pycache__/
 *.FCStd.*
 /Holder.FCStd
 /Splitbox_test.FCStd
+/.tmp-freecad-*

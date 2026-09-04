@@ -1,12 +1,9 @@
 import os
 
 import FreeCADGui as Gui
-import split2enclosure
 
 
-# FreeCAD executes InitGui.py rather than importing it, so ``__file__`` is not
-# defined here. Locate the add-on root through the regular Python package.
-ADDON_ROOT = os.path.dirname(os.path.dirname(split2enclosure.__file__))
+ADDON_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
 
 
 class Split2EnclosureWorkbench(Gui.Workbench):
@@ -14,7 +11,7 @@ class Split2EnclosureWorkbench(Gui.Workbench):
     ToolTip = "Split hollow solids and create matched enclosure joints"
 
     def Initialize(self):
-        import split2enclosure.command  # noqa: F401
+        from . import command  # noqa: F401
 
         commands = ["Split2Enclosure_Create"]
         self.appendToolbar("Split2Enclosure", commands)

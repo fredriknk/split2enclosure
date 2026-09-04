@@ -29,7 +29,7 @@ from .selection_state import encode_contour_state, match_contour_state
 
 
 ICON_PATH = os.path.join(
-    os.path.dirname(os.path.dirname(__file__)),
+    os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
     "Resources",
     "icons",
     "split2enclosure.svg",

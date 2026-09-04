@@ -14,7 +14,7 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if not os.environ.get("SPLIT2ENCLOSURE_TEST_INSTALLED") and PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from split2enclosure.geometry import (
+from freecad.Split2Enclosure.geometry import (
     _joint_section,
     _safe_refine,
     _thin_wall_contact_length,
@@ -26,7 +26,7 @@ from split2enclosure.geometry import (
     ruled_contour_positive_direction,
     split_with_sketch,
 )
-from split2enclosure.config import DEFAULTS, load_defaults
+from freecad.Split2Enclosure.config import DEFAULTS, load_defaults
 
 
 def hollow_box(open_top=True):
@@ -774,7 +774,7 @@ class GeometryTests(unittest.TestCase):
         source = hollow_box(open_top=False)
         origin, normal = plane_from_axes("XY", 10)
         with mock.patch(
-            "split2enclosure.geometry._offset_fill",
+            "freecad.Split2Enclosure.geometry._offset_fill",
             side_effect=ValueError("simulated OCC offset failure"),
         ):
             result = make_enclosure(
